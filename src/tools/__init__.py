@@ -25,7 +25,7 @@
 ═══ 工具分组：**全部放 basic** ═══
 
 框架支持把工具分组，非 ``basic`` 的组需要**显式激活**才可见，
-而 ``basic`` 组**始终**激活（``tool/_toolkit.py:183-185``：
+而 ``basic`` 组**始终**激活（``agentscope/tool/_toolkit.py:183-185``：
 "The ``basic`` group will always be included regardless of the filter"；
 强制点在 ``:254-277`` —— 未激活的组，其工具会被包成一个
 ``ToolGroupInactiveError`` 的 ``ToolChunk`` 返回）。
@@ -110,7 +110,7 @@ def build_business_tools(
 
     框架的服务层（``agentscope.app``）需要的是一个 ``list[ToolBase]``
     —— 注意 ``AgentToolFactory`` 的**返回类型**是
-    ``Awaitable[list[ToolBase]]``（``app/_types.py:33-36``），
+    ``Awaitable[list[ToolBase]]``（``agentscope/app/_types.py:33-36``），
     框架写的是 ``tools += await factory(...)``，也就是它要的是
     **被 await 之后**的那个列表。它不要 ``Toolkit`` ——
     ``Toolkit`` 由框架在自己的装配流程里构造。所以两条路径都要有入口。

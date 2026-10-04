@@ -101,7 +101,7 @@
     再读回放日志**。这样窗口内发布的事件一定落在订阅队列里，不会丢。
 
     代价是「回放日志」与「订阅队列」会有**重叠**：一条事件先 ``log_append``
-    再 ``publish``（``app/_bus_ops.py:40-66``），若它恰好落在「订阅已挂、
+    再 ``publish``（``agentscope/app/_bus_ops.py:40-66``），若它恰好落在「订阅已挂、
     回放未读」之间，两处都能拿到。所以下面按 ``_entry_id`` 去重 —— 那个 id
     由总线的 ``log_append`` 分配，回放与实时是**同一个值**。去重是必需的：
     重复消费一次 ``TOOL_CALL_END`` 会登记出**重复的任务**。
@@ -135,7 +135,7 @@ logger = logging.getLogger(__name__)
 
 #: SSE 心跳间隔（秒）。
 #:
-#: ⚠️ 与框架 ``app/_router/_session.py:717`` 的 ``_HEARTBEAT_INTERVAL_SECS``
+#: ⚠️ 与框架 ``agentscope/app/_router/_session.py:717`` 的 ``_HEARTBEAT_INTERVAL_SECS``
 #: 取值一致（30）。**不复用框架那个常量**：它是私有模块属性，导入它等于把
 #: 我们绑在框架的内部结构上；而这两个值是否相等本身没有语义约束 ——
 #: 各自表达的是「本连接允许多久没有内容」。保持一致只是为了让两条连接在

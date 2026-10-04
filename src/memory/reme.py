@@ -22,7 +22,7 @@
 ═══ ⚠️ 三件必须说清楚的事 ═══
 
   1. **安装**。``ReMeMiddleware`` 的应用是**惰性构建**的
-     （``_middleware.py:225-231`` 的 ``_build_app``），第一次用才
+     （``agentscope/middleware/_longterm_memory/_reme/_middleware.py:225-231`` 的 ``_build_app``），第一次用才
      ``import reme``。所以「装没装」在装配期是**看不出来**的 ——
      这正是本模块要在装配期**主动探测**一次的原因。
      没装时抛的是 ``ImportError``，而它会在第一次对话时才炸。
@@ -93,7 +93,7 @@ class ReMeBundle:
     ``both`` 模式会把 ``memory_search`` 暴露成一个工具，
     而那个工具**不在** Toolkit 里 —— 它由中间件自己提供，
     要显式 ``await mw.list_tools()`` 取出来加进 Toolkit
-    （见 ``_middleware.py:115-128`` 的示例）。
+    （见 ``agentscope/middleware/_longterm_memory/_reme/_middleware.py:115-128`` 的示例）。
     只挂中间件、不加工具，症状是「模型说它要搜记忆，但那个工具
     不存在」，而日志里一切正常。
     """

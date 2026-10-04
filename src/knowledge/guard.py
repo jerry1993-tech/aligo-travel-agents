@@ -30,7 +30,7 @@
     根因不在我们的检索代码里，而在**它没有截止时间**：
 
       · ``MilvusLiteStore.search`` 是 ``await asyncio.to_thread(
-        self.get_client().search, ...)``（``_vdb/_milvus_lite.py:303-311``），
+        self.get_client().search, ...)``（``agentscope/rag/_vdb/_milvus_lite.py:303-311``），
         **没有 timeout 参数**；
       · 它最终落到 ``pymilvus`` 的 gRPC 调用上，而 ``pymilvus`` 自己在
         建连路径上留了一句注释：``grpc.Future.result(timeout=None) blocks
@@ -58,10 +58,10 @@
    2026-10-03 自查时发现的一处真实缺口。``has_collection`` 名字上像
    「探询」，``create_collection`` 名字上像「写」，可它们俩**都在检索
    路径上**：框架的 ``KnowledgeBase.search()`` 每次都先走
-   ``ensure_collection()``（``rag/_knowledge.py:237`` → ``:167``），
+   ``ensure_collection()``（调用点 ``agentscope/rag/_knowledge.py:237`` → 定义 ``:160``），
    而它是 ``has_collection`` 问一句、**没有就 ``create_collection``**
-   （``rag/_knowledge.py:179``），成功之后才把 ``_collection_ready``
-   置真（``:128``）。两个都是 Milvus RPC、两个都没有截止时间，因此
+   （``agentscope/rag/_knowledge.py:179``），成功之后才把 ``_collection_ready``
+   置真（``:184``）。两个都是 Milvus RPC、两个都没有截止时间，因此
    **卡住其中任何一个，与卡住 ``search`` 对使用者完全等价** ——
    而这是我们 2026-10-03 实测到的同一形态。
 
@@ -92,9 +92,9 @@
 一件不做就会前功尽弃的事：客户端预热必须离开事件循环
 ------------------------------------------------------------------------------
     框架的读方法都是 ``await asyncio.to_thread(self.get_client().search,
-    ...)`` 的形状（``_vdb/_milvus_lite.py:304``、``:187``）—— 注意
+    ...)`` 的形状（``agentscope/rag/_vdb/_milvus_lite.py:304``、``:187``）—— 注意
     ``self.get_client()`` 是 ``to_thread`` 的**实参**，在**事件循环线程**
-    上求值；而它第一次调用会真的建连（``_vdb/_milvus_lite.py:78-84``）。
+    上求值；而它第一次调用会真的建连（``agentscope/rag/_vdb/_milvus_lite.py:78-84``）。
     那是一次**同步**阻塞：Milvus 不可达时它会把整个事件循环按住
     （pymilvus 在**建连**路径上自己把 ``timeout=None`` 归一到 10s，
     ``pymilvus/client/grpc_handler.py:248``），于是 ``asyncio.wait_for``
@@ -329,7 +329,7 @@ class GuardedVectorStore:
         不是猜出来的。
 
     ⚠️ 框架侧对 ``vector_store`` 只做鸭子类型使用（``KnowledgeBase`` 是
-    普通类，构造时不校验类型，``rag/_knowledge.py:44``），所以代理不会
+    普通类，构造时不校验类型，``agentscope/rag/_knowledge.py:44``），所以代理不会
     被 ``isinstance`` 拦住。本项目的 ``store.get_client()`` /
     ``store._client`` 这类访问也照常透传。
 
@@ -406,7 +406,7 @@ class GuardedVectorStore:
 
         ⚠️ 它看着不像读操作，但**在检索路径上**：框架的
         ``KnowledgeBase.search()`` 每次都先经 ``ensure_collection()``
-        调它（``rag/_knowledge.py:179``），卡住它等于卡住检索。
+        调它（``agentscope/rag/_knowledge.py:179``），卡住它等于卡住检索。
         理由详见模块文档约束 1。
         """
         return await self._bounded(
@@ -421,7 +421,7 @@ class GuardedVectorStore:
 
         ⚠️ 它名字上像「写」，但它**在检索路径上**：框架的
         ``KnowledgeBase.ensure_collection()`` 在 ``has_collection`` 回答
-        「没有」时会调它（``rag/_knowledge.py:179``），而那一步由
+        「没有」时会调它（``agentscope/rag/_knowledge.py:179``），而那一步由
         ``search()`` 触发（``:237``）。集合缺失时，它就是唯一没有护栏的
         那一次调用 —— 理由详见模块文档约束 1。
         """
@@ -585,7 +585,7 @@ class GuardedVectorStore:
 
         # 常见的快路径：客户端早就建好了，连判断都不必做。
         # ⚠️ 这里读 ``_client`` 是探头，不是依赖：它是框架自己的缓存字段
-        # （``_vdb/_milvus_lite.py:75``，随包 vendored、版本固定）。
+        # （``agentscope/rag/_vdb/_milvus_lite.py:75``，随 pip 包安装、版本由 requirements.txt 钉死）。
         # 判断错了也不影响正确性 —— 大不了多绕一次线程预热。
         if getattr(self._inner, "_client", None) is not None:
             return

@@ -12,7 +12,7 @@
       配置来自 :class:`src.config.schema.ObservabilitySettings`。
     - 下游：``agentscope.middleware.TracingMiddleware`` —— 它是**消费方**，
       只调用 ``opentelemetry.trace.get_tracer("agentscope", ...)``
-      （见 ``middleware/_tracing/_setup.py:11-19``），
+      （见 ``agentscope/middleware/_tracing/_setup.py:11-19``），
       取到的 tracer 来自哪个 provider，完全取决于我们在这里注册了什么。
 
 ------------------------------------------------------------------------------
@@ -26,7 +26,7 @@
 ------------------------------------------------------------------------------
 最危险的失效模式：静默短路（Silent Short-Circuit）
 ------------------------------------------------------------------------------
-    框架在每个钩子开头都做同一个判断（``middleware/_tracing/_trace.py:59-70``）::
+    框架在每个钩子开头都做同一个判断（``agentscope/middleware/_tracing/_trace.py:59-70``）::
 
         return isinstance(otel_trace.get_tracer_provider(), TracerProvider)
 

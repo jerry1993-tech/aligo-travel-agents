@@ -83,8 +83,8 @@ name: aligo-travel            # 项目名：决定网络名、卷名前缀与 co
 # ------------------------------------------------------------------------------
 x-app-common: &app-common
   build:
-    context: .                # 构建上下文为仓库根目录：需要 requirements.txt 与 third_party/
-                              # （后者是 agentscope / ReMe 的**安装源码**，构建期才被 pip install）
+    context: .                # 构建上下文为仓库根目录：只需要 requirements.txt ——
+                              # 两个框架包（agentscope / reme-ai）是清单里的 pip 依赖
     dockerfile: Dockerfile
     args:
       # 容器内 pip 源。本机实测 pypi.org 与阿里云源均可达，保留阿里云为保守默认。

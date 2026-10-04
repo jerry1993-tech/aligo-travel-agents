@@ -93,8 +93,8 @@ SETTINGS_ATTR = "settings"
 #: 只是所有用户都拿不到那条共享凭据，症状与「运营者根本没配密钥」
 #: 一模一样。把它写成一个具名常量，至少让「改错拼写」这件事
 #: 只有一处可改。**不要**为了对称去 ``setattr`` 它 ——
-#: 框架只在 ``create_app`` 装配期写这个属性（``app/_app.py:303-304``），
-#: 其 lifespan 仅**读取**（``app/_lifespan.py:56``，再传给
+#: 框架只在 ``create_app`` 装配期写这个属性（``agentscope/app/_app.py:303-304``），
+#: 其 lifespan 仅**读取**（``agentscope/app/_lifespan.py:56``，再传给
 #: ``ResourceAccessService``，见 ``:108``）。所以自己写一次的结果是二选一：
 #: 写在 ``create_app`` **之前**会被框架覆盖（白写），写在**之后**则不会被覆盖，
 #: 从此 ``app.state`` 上就有两份策略，谁生效取决于谁去读 —— 两种都是两个真相。

@@ -22,7 +22,7 @@
         (b) 会话的 ``chat_model_config`` 指向那条记录（``type`` +
             ``credential_id`` + ``model`` + ``parameters``）。
 
-    缺 (b) 时 ``app/_service/_chat.py:1097-1101`` 直接 ``HTTPException(404, ...)``；缺 (a) 时
+    缺 (b) 时 ``agentscope/app/_service/_chat.py:1097-1101`` 直接 ``HTTPException(404, ...)``；缺 (a) 时
     ``CredentialFactory.from_dict`` 找不到记录。两条都不会让健康检查变红 ——
     ``/healthz`` 只看进程活没活，``/readyz`` 只看存储/总线通不通。于是最坏
     的部署形态出现了：**所有探针绿、SPA 正常渲染、「发送」按钮永远灰着**。

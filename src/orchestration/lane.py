@@ -40,14 +40,16 @@
 ═══ 用到的两个框架事实（均已核实） ═══
 
 1. ``on_model_call`` 的返回值**直接决定**模型那一层拿到什么
-   （``agent/_agent.py:3365-3371`` 是 ``return await mw.on_model_call(...)``，
+   （``agentscope/agent/_agent.py:3365-3371`` 是 ``return await mw.on_model_call(...)``，
    而调用点上面就是 ``return await model(...)``）。所以只要**不调用**
    ``next_handler``，真实模型就一次都不会被调到。
 2. ``ChatResponse`` 是**普通 dataclass**，构造它不需要真的有模型
-   （``model/_model_response.py``）。消费侧（``agent/_agent.py:1744-1762``）
-   对 ``isinstance(res, ChatResponse)`` 的分支是「直接当作完整响应使用」，
-   因此返回一个 ``is_last=True`` 的普通对象即可，**不必**构造异步生成器。
-   ``is_last=True`` 是必须的：消费侧靠它判断「这轮模型输出到此结束」。
+   （``model/_model_response.py``）。消费侧对 ``isinstance(res, ChatResponse)``
+   的分支是「直接当作完整响应使用」，**不读** ``is_last``
+   （``agentscope/agent/_agent.py:1759-1765``）—— ``is_last`` 只在流式分支
+   被消费（``:1745-1757``）。因此返回一个普通 ``ChatResponse`` 即可，
+   **不必**构造异步生成器；``is_last=True`` 说的是「这是完整响应」
+   （该字段无默认值，必须显式给），不是消费侧的要求。
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ DEFAULT_ROUTE_TOOL = "aligo_route_intent"
 #:
 #: ⚠️ 带 ``aligo:`` 前缀是刻意的。``middle_context`` 是个**没有命名空间
 #: 约束**的裸 dict，框架自己的中间件习惯用「类名」当键（见
-#: ``middleware/_base.py:296-303`` 的 ``get_middleware_key``）。本键是
+#: ``agentscope/middleware/_base.py:296-303`` 的 ``get_middleware_key``）。本键是
 #: **跨中间件共享**的（:mod:`src.orchestration.context` 要读它来决定阶段），
 #: 不属于任何单个中间件，所以不能挂在某个类名下面 —— 但也因此必须取一个
 #: 不可能与类名撞车的名字。
@@ -104,7 +106,7 @@ ROUTE_TOOL_INPUT_FIELDS: tuple[str, ...] = (
 #:
 #: 这份名单是**穷举**的，不是「常见的那几个」：框架给团队 leader 挂的是
 #: ``TeamCreate / AgentCreate / TeamSay / TeamDelete``（外加用户有可邀请
-#: 智能体时的 ``AgentInvite``，见 ``app/_service/_toolkit.py:184-198``），
+#: 智能体时的 ``AgentInvite``，见 ``agentscope/app/_service/_toolkit.py:187-222``），
 #: 另外规划类的 ``TaskCreate / TaskList / TaskGet / TaskUpdate`` 四个
 #: **无条件**注入（同文件 ``:143``）。
 #:
@@ -132,8 +134,8 @@ ORCHESTRATION_TOOLS: frozenset[str] = frozenset(
 #: 自己开关工具组。名字同样来自框架，同样会静默失效。
 #:
 #: ⚠️ 单独立一条、不并进 :data:`ORCHESTRATION_TOOLS`，是因为**注入条件不同**：
-#: 编排工具是「有团队/规划能力就有」（``app/_service/_toolkit.py:143,184``），
-#: 而元工具的注入条件是「**工具组多于一个**」（``tool/_toolkit.py:502-510``），
+#: 编排工具是「有团队/规划能力就有」（``agentscope/app/_service/_toolkit.py:143,187-222``），
+#: 而元工具的注入条件是「**工具组多于一个**」（``agentscope/tool/_toolkit.py:502-510``），
 #: 也就是会话配了模型时才会出现的 ``schedule_tools`` 组。两者混成一条，
 #: 将来核对注入条件时必然对不上号。
 #:
@@ -156,7 +158,7 @@ TOOL_MANAGEMENT_TOOLS: frozenset[str] = frozenset({"reset_tools"})
 #: 判据从「是不是写工具」回到「是不是用户可见的写操作」。
 PROCESS_CONTROL_TOOLS: frozenset[str] = frozenset({"ToolStop"})
 
-#: 工作区自带的**文件/进程工具**（``workspace/_base.py:554-563`` 的六件套）。
+#: 工作区自带的**文件/进程工具**（``agentscope/workspace/_base.py:554-563`` 的六件套）。
 #:
 #: ⚠️ 这份名单**只给快车道收窄用**，刻意**不**并进 :data:`INTERNAL_TOOLS`：
 #:
@@ -167,7 +169,7 @@ PROCESS_CONTROL_TOOLS: frozenset[str] = frozenset({"ToolStop"})
 #:   交代。守卫的取舍一贯是「宁可留一段独白，不可删一段正文」，所以这里
 #:   保持按 ``is_read_only`` 判断的保守路径。
 #:
-#: ⚠️ 名字来自 ``workspace/_base.py:576-581`` 的类名，改名同样会静默失效。
+#: ⚠️ 名字来自 ``agentscope/workspace/_base.py:576-581`` 的类名，改名同样会静默失效。
 WORKSPACE_TOOLS: frozenset[str] = frozenset(
     {"Bash", "Edit", "Glob", "Grep", "Read", "Write"},
 )
@@ -183,9 +185,9 @@ WORKSPACE_TOOLS: frozenset[str] = frozenset(
 #:
 #: ⚠️ 第 2 处是**踩出来的**：早先守卫只按工具自报的 ``is_read_only`` 判断，
 #: 并想当然地写了一句注释「框架的团队/元工具自报 is_read_only=True」。
-#: 实测这句只对**团队**工具成立（``app/_tool/_team_tool_base.py:42`` 是 True），
+#: 实测这句只对**团队**工具成立（``agentscope/app/_tool/_team_tool_base.py:42`` 是 True），
 #: 而 ``TaskCreate / TaskList / TaskGet / TaskUpdate``（``tool/_task/
-#: _task_tool_base.py:23``）、``reset_tools``（``tool/_builtin/_meta.py:43``）
+#: agentscope/tool/_task/_task_tool_base.py:23``）、``reset_tools``（``agentscope/tool/_builtin/_meta.py:43``）
 #: 与 ``ToolStop`` 全都自报 ``False`` —— 于是模型建任务清单、停后台任务那几轮的
 #: **过程独白被原样发给用户**，正是守卫本该消灭的那类文本。
 INTERNAL_TOOLS: frozenset[str] = ORCHESTRATION_TOOLS | TOOL_MANAGEMENT_TOOLS | PROCESS_CONTROL_TOOLS
@@ -422,8 +424,8 @@ class LaneRouterMiddleware(MiddlewareBase):
 
         # ── 守卫一：只在**本次回复的第一轮推理**上路由 ──
         #
-        # 已核实 ``agent/_agent.py:1112-1116``：每次 ``reply`` 开始时
-        # ``reply_context`` 被重置成 ``cur_iter=0``；而 ``agent/_agent.py:1269``
+        # 已核实 ``agentscope/agent/_agent.py:1112-1116``：每次 ``reply`` 开始时
+        # ``reply_context`` 被重置成 ``cur_iter=0``；而 ``agentscope/agent/_agent.py:1269``
         # 在「本轮所有工具调用都已拿到结果」时 ``cur_iter += 1``。
         # 所以快车道合成的工具调用执行完之后，第二轮模型调用的 ``cur_iter``
         # 是 1，不会再次命中这里。
@@ -436,7 +438,7 @@ class LaneRouterMiddleware(MiddlewareBase):
         # 与守卫一重叠，但**不是冗余**：守卫一依赖 ``cur_iter`` 的递增时机
         # （框架若把「工具全部完成」的判定改到别处，或某轮工具全部被 HITL
         # 挂起而没递增，守卫一就会失效）。这条只依赖 ``reply_id`` —— 它在
-        # 每次 reply 开始时重新生成（``agent/_agent.py:1112``），语义直接就是
+        # 每次 reply 开始时重新生成（``agentscope/agent/_agent.py:1112``），语义直接就是
         # 「这是不是同一次回复」，不依赖任何中间状态的时序。
         #
         # 没有它，重复命中会让**同一个工具被合成调用两次**：用户点一次
@@ -666,9 +668,11 @@ class LaneRouterMiddleware(MiddlewareBase):
     def _synthesize(self, decision: Any) -> Any:
         """构造一条「模型决定调用路由工具」的合成响应。
 
-        ⚠️ ``is_last=True`` 是**必须**的：消费侧
-        （``agent/_agent.py:1744-1762``）靠它判断「本轮模型输出到此结束」。
-        缺了它，框架会认为模型还要继续输出，行为不确定。
+        ⚠️ ``is_last=True`` 描述的是「这条响应是完整响应」（该字段在
+        ``ChatResponse`` 上没有默认值，构造时必须显式给）。别把它当成
+        消费侧的硬性要求：普通 ``ChatResponse`` 分支
+        （``agentscope/agent/_agent.py:1759-1765``）**不读** ``is_last``，
+        它只在流式分支被消费（``:1745-1757``）。
 
         ⚠️ 工具调用的 ``state`` 保持默认的 ``PENDING``，**不要**自作主张
         标成已完成。框架会把这条调用交给 ``on_check_permission`` 与

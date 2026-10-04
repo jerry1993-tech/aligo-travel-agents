@@ -4,7 +4,7 @@
 ═══ ⚠️ 这里没有自建 store ═══
 
 框架的 :class:`agentscope.rag.MilvusLiteStore` 内部就是
-``pymilvus.MilvusClient(uri=...)``（``rag/_vdb/_milvus_lite.py:78-84``）。
+``pymilvus.MilvusClient(uri=...)``（``agentscope/rag/_vdb/_milvus_lite.py:78-84``）。
 它的名字有误导性 —— 决定「走内嵌 Lite 还是连服务端」的是
 ``_is_local_db_uri``（``:538-543``）::
 
@@ -137,7 +137,7 @@ async def request_strong_consistency(
     """请求把集合的一致性级别设为 :data:`CONSISTENCY_LEVEL`（幂等）。
 
     ⚠️ 为什么需要它：框架的 ``create_collection`` 不传
-    ``consistency_level``（``rag/_vdb/_milvus_lite.py:108-166``），
+    ``consistency_level``（``agentscope/rag/_vdb/_milvus_lite.py:108-166``），
     服务端于是用默认值 Bounded —— 写进去的东西**要过一会儿才能被检索到**。
     实测数据与后果见 :data:`CONSISTENCY_LEVEL` 的注释。这里是我们唯一
     能纠正它的地方：框架的接口里没有这个旋钮，而集合一旦建好，
@@ -287,7 +287,7 @@ async def describe_collection(
     }
 
     # ⚠️ ``get_client()`` 可能触发一次**同步**建连（框架惰性创建，见
-    # ``_vdb/_milvus_lite.py:78-84``）。在这里直接调用会把事件循环按住，
+    # ``agentscope/rag/_vdb/_milvus_lite.py:78-84``）。在这里直接调用会把事件循环按住，
     # 于是本函数外层的 ``asyncio.wait_for``（:func:`probe_collection`）
     # 根本等不到超时 —— 循环被占着，定时器回调没机会跑。丢进线程里，
     # 超时才真的算数。正常路径上客户端已被护栏预热过，这里只是一次

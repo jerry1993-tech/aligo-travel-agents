@@ -420,7 +420,7 @@ def test_the_resolver_uses_the_captured_user_id(settings: Settings) -> None:
     """★★★ ``user_id`` 来自**装配时捕获**的参数，不是从 agent 上猜的。
 
     ⚠️ 这是多租户隔离的支点。``AgentMiddlewareFactory`` 被框架调用时
-    把 ``user_id`` 作为参数传进来（``app/_service/_chat.py:240-253``），
+    把 ``user_id`` 作为参数传进来（``agentscope/app/_service/_chat.py:994-1000``），
     那是唯一可信的来源。从 agent 上猜（名字、某个 context 字段）会得到
     「看起来能用、偶尔串到别人画像」的行为 —— 而串号是事故。
     """

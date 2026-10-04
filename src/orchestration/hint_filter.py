@@ -21,7 +21,7 @@
 1. ``Agent._inject_runtime_state`` 把一段运行时状态包进 HintBlock 追加到
    上下文（``agentscope/agent/_agent.py:1629-1632``），随后 yield 一个
    ``HintBlockEvent``（``agentscope/agent/_agent.py:1633-1639``）。
-   那段文本的默认模板是**英文提示词**（``agent/_config.py:285-292``）::
+   那段文本的默认模板是**英文提示词**（``agentscope/agent/_config.py:285-292``）::
 
        <system-reminder>Treat the following as the ground truth at this point
        of the conversation. Anything stated earlier is outdated, ...
@@ -29,17 +29,17 @@
    也就是说，用户在界面上展开「运行状态」，读到的是一句对模型下的英文指令。
 
 2. ``ChatService`` 把 agent 的**每一个**事件无条件
-   ``publish_session_event(...)``（``app/_service/_chat.py:1250-1269``），
+   ``publish_session_event(...)``（``agentscope/app/_service/_chat.py:1250-1269``），
    没有任何按类型的过滤 —— 事件直达 message bus。
 
 3. ``GET /sessions/{id}/stream`` 把总线上的事件原样写成 SSE 帧
-   （``app/_router/_session.py:907-915``），前端 ``case 'hint'`` 把它渲染成
-   一个可折叠的「系统消息 - 运行状态」（``ASMessageBubble.tsx:670-729``）。
+   （``agentscope/app/_router/_session.py:907-915``），前端 ``case 'hint'`` 把它渲染成
+   一个可折叠的「系统消息 - 运行状态」（``web/frontend/src/components/chat/ASMessageBubble.tsx:670-729``）。
 
 4. **刷新也躲不掉**：``Msg.append_event`` 对 ``HINT_BLOCK`` 的处理是把整块
    追加进消息 content，注释写明 "for persistence and replay"
    （``agentscope/message/_base.py:372-382``）；``ChatService`` 随后
-   ``upsert_message(reply_msg)``（``app/_service/_chat.py:1456-1463``），于是
+   ``upsert_message(reply_msg)``（``agentscope/app/_service/_chat.py:1456-1463``），于是
    ``GET /sessions/{id}/messages`` 每次都把它带回来。
 
 ═══ 为什么在**中间件**这一层拦，而不是别的三处 ═══
@@ -47,11 +47,11 @@
 - **不是前端过滤**：数据仍然发到浏览器，只是不画。信息已经出网，
   而且换任何别的客户端（CLI、第三方集成）就漏了。
 - **不是改 ``InjectionConfig.emit_hint_event``**：那是 ``InjectionConfig``
-  的字段（``agent/_config.py:353-359``），而**装配 agent 的不是我们**
+  的字段（``agentscope/agent/_config.py:353-359``），而**装配 agent 的不是我们**
   —— 框架在 ``app/_service/`` 内部构造 agent，从头到尾没给我们传
   ``injection_config`` 的口子。况且那个开关只覆盖「运行时状态」一种来源，
-  RAG（``middleware/_rag.py:995``）、收件箱（``app/middleware/_inbox_middleware.py:128``）、
-  团队成员回报（``app/middleware/_team_member_middleware.py:215``）各自
+  RAG（``agentscope/middleware/_rag.py:995``）、收件箱（``agentscope/app/middleware/_inbox_middleware.py:128``）、
+  团队成员回报（``agentscope/app/middleware/_team_member_middleware.py:215``）各自
   还会发自己的 HintBlockEvent。
 - **不是改 ``/sessions/{id}/messages`` 的返回**：那是框架路由。
 
@@ -175,7 +175,7 @@ def _safe_source(event: HintBlockEvent) -> str:
     Returns:
         `str`: 来源字符串；为空时返回 ``"?"``。
 
-    ⚠️ ``source`` 是 ``str | None``（``event/_event.py:310-311``），
+    ⚠️ ``source`` 是 ``str | None``（``agentscope/event/_event.py:307-308``），
     直接进 ``%s`` 会打出 ``None``，读日志时要多绕一下才知道是「没来源」
     还是「来源就是个叫 None 的字符串」。统一成 ``"?"``。
     """
@@ -192,7 +192,7 @@ def _hint_length(event: HintBlockEvent) -> int:
         `int`: 字符数；``hint`` 是多模态块列表时按各块 ``text`` 累加。
 
     ⚠️ ``hint`` 是 ``str | list[TextBlock | DataBlock]`` 两种形态
-    （``event/_event.py:313-314``）。只处理 ``str`` 的话，列表形态会
+    （``agentscope/event/_event.py:309-310``）。只处理 ``str`` 的话，列表形态会
     在 ``len()`` 上抛类型错误 —— 而这行日志在**事件循环里**，抛出去
     会把这轮回复打断。宁可返回 0 也不抛。
     """

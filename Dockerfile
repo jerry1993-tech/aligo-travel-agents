@@ -5,7 +5,8 @@
 #
 # 上下游依赖：
 #   - 上游：被 `docker-compose.yaml` 的 `app` 服务以 `build.context: .` 引用；
-#           依赖根目录 `requirements.txt`（第三方依赖清单）与 `third_party/`（源码库）。
+#           依赖根目录 `requirements.txt`（第三方依赖清单 —— 两个框架包
+#           agentscope / reme-ai 也在其中，无需任何源码树）。
 #   - 下游：容器内以非 root 用户运行 `uvicorn`，对外暴露 8000，健康检查打 `/healthz`。
 #
 # 关键约定（勿擅改）：
@@ -75,20 +76,12 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
 # 先只拷贝依赖清单再安装：只要 requirements.txt 未变，这一层就能命中 Docker 构建缓存，
 # 改业务代码时不必重装依赖（显著缩短迭代时间）。
 COPY requirements.txt /tmp/requirements.txt
-# setuptools 与 wheel 必须显式装上：下面的本地源码包用 `--no-build-isolation` 构建，
-# 该开关意味着「用当前环境里的构建后端，不去 PyPI 下载隔离环境」—— 若缺 setuptools，
-# 构建会以 `BackendUnavailable: Cannot import 'setuptools.build_meta'` 失败。
+# setuptools 与 wheel 随 pip 一起升级：个别依赖若只有 sdist，构建轮子需要它们。
+# ⚠️ 两个框架包（agentscope / reme-ai）就在 requirements.txt 第 零 节，
+#    与其余依赖**同一次求解**装完 —— 不存在「先装依赖、再补装框架」的两段式安装，
+#    也就不会出现两段安装把版本互相打散的情况。
 RUN pip install --upgrade pip setuptools wheel \
     && pip install -r /tmp/requirements.txt
-
-# ---- 安装本地源码包：agentscope 与 ReMe ----
-# 这一步做了两件事：把两个库装成 site-packages 里真正的包（于是运行期 `import agentscope`
-# 直接可用），以及让本项目**不再需要** PYTHONPATH 指向 third_party/。
-#   那会拉进与 requirements.txt 不一致的版本，把已钉好的组合打散。
-COPY third_party/agentscope/ /tmp/src/agentscope/
-COPY third_party/ReMe/ /tmp/src/ReMe/
-RUN pip install --no-deps --no-build-isolation /tmp/src/agentscope /tmp/src/ReMe \
-    && rm -rf /tmp/src
 
 
 # ------------------------------------------------------------------------------
@@ -100,10 +93,9 @@ FROM python:3.11-slim AS runtime
 #   PYTHONUNBUFFERED     日志实时输出，不缓冲（否则 `docker logs` 看不到实时日志）
 #   PYTHONDONTWRITEBYTECODE 不生成 .pyc，保持挂载目录干净
 #   PYTHONPATH           现在**只需** /app，让 `import src.*` 可用。
-#                        agentscope / reme 已在 builder 阶段装进 /opt/venv，
-#                        由 site-packages 解析 —— 不再需要、也不应再写上
-#                        third_party 的 src 路径（那会让"到底加载的是哪份代码"
-#                        变得不确定，且与本地开发环境的行为分叉）。
+#                        agentscope / reme 已由首次 `pip install -r` 装进
+#                        /opt/venv，由 site-packages 解析 —— 不需要、也不应再写
+#                        任何源码树路径（那会让"到底加载的是哪份代码"变得不确定）。
 #   TZ                   容器时区，与业务侧 InjectionConfig.timezone 保持一致
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -131,24 +123,17 @@ WORKDIR /app
 
 # 拷贝项目源码。--chown 保证 aligo 用户对代码有读权限。
 #
-# ⚠️ 这里**仍然**要拷 third_party/，但它已经**不再参与模块导入**（agentscope / reme 走
-#   /opt/venv 的 site-packages，见上方 PYTHONPATH 说明）。留着它是为了**运行期资产**：
-#   `third_party/ReMe/skills/<技能名>/SKILL.md` 位于 ReMe 仓库根级、**不在 `reme` 包内**，
-#   因此 `pip install` 不会把它带进 site-packages，而 ReMe 运行期要求技能目录下存在
-#   SKILL.md（缺失即抛 FileNotFoundError）。.dockerignore 已专门保留这类 SKILL.md，
-#   详见该文件第三、四节的说明。
-#   体量（**实测值**，取自镜像内实物 `du -sb`，不是估算、也不是 BuildKit 的进度行）：
-#   .dockerignore 过滤后整个构建上下文是 **7.02 MB**（7,017,657 字节），
-#   而 third_party/ 在磁盘上是 174 MB（其中 52 MB 是 ReMe 的 .git）。
-#   即 .dockerignore 挡掉了约 **96%**，而留下的这 7.02 MB 几乎全是**构建必需**的源码：
-#   agentscope/src 6.09 MB 是那两个 `pip install` 的输入，**动不得**。
-#   ⚠️ 早先这里写的是"179.75 kB、挡掉 99.9%"，**那两个数都是错的**：179.75 kB 是
-#      BuildKit 在缓存命中时报的**增量传输**，被误当成了上下文总量。辨别方法已写在
-#      .dockerignore 末尾（同一份上下文连跑两次，13.10MB → 137.68kB）。
+# ⚠️ 这里**没有** third_party/：两个框架包（agentscope / reme-ai）是普通 pip 依赖，
+#   装在 /opt/venv 的 site-packages（见上方两段说明），运行期的一切 import 都解析到
+#   那里 —— 镜像里没有、也不需要第二份框架源码。
+#   体量（**实测值**，按 .dockerignore 末尾写的推荐口径测量；2026-10-04 复核）：
+#   .dockerignore 过滤后构建上下文是 **20.12 MiB / 824 个文件**，其中占比最大的是
+#   `src/server/static/` 下的前端构建产物（14.69 MiB / 393 个文件）—— 它是
+#   **运行期资产**（由 app 直接托管），必须进镜像。（third_party/ 已于 2026-10-04
+#   随「框架改 pip 包安装」从仓库移除，构建上下文相应变小。）
 #   所以：本文件与 .dockerignore 是配套的，改任何一个前请**先读 .dockerignore 的注释**；
 #   但也不要为了"再压掉一点体积"去动它——真正必须排除的理由是**密钥入层**与**代码重复**，
-#   不是体积。这张上下文清单已压到接近下限，再往下砍就会切到构建输入。
-COPY --chown=1000:1000 third_party/ /app/third_party/
+#   不是体积。
 COPY --chown=1000:1000 src/ /app/src/
 COPY --chown=1000:1000 config/ /app/config/
 COPY --chown=1000:1000 scripts/ /app/scripts/

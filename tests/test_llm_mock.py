@@ -382,13 +382,13 @@ def test_zero_chunk_size_is_rejected_at_construction() -> None:
 #
 #   根因在两处，都是「读一下 model.formatter」这种不起眼的动作：
 #
-#     1. ``app/_service/_model.py:67``
+#     1. ``agentscope/app/_service/_model.py:67``
 #            ``model.formatter.input_types = card.input_types``
 #        —— 它包在 ``try/except Exception`` 里，异常只记 **DEBUG**。
 #           也就是说缺失的 formatter 在这里被**静默吞掉**，日志默认级别下
 #           一个字都看不到。
 #
-#     2. ``agent/_agent.py:2062``
+#     2. ``agentscope/agent/_agent.py:2062``
 #            ``supported = self.model.formatter.supported_input_media_types``
 #        —— 这一次没有被吞，于是 AttributeError 跑到 setup 阶段，
 #           变成一句语义完全不同的「智能体初始化失败」。

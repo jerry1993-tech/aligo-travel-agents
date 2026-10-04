@@ -10,9 +10,9 @@
 结构化输出这条链路上有三层我们控制不了的东西：
 
 1. 框架会把 schema 注册成一个叫 ``GenerateStructuredOutput`` 的**工具**，
-   而不是用 JSON mode（``agent/_agent.py:1126-1132``）。
+   而不是用 JSON mode（``agentscope/agent/_agent.py:1126-1132``）。
 2. 交付物在 ``Msg.structured_output``（**dict**），不在消息正文里
-   （``agent/_agent.py:3568-3577``）。
+   （``agentscope/agent/_agent.py:3568-3577``）。
 3. 校验失败**不抛异常**，而是变成一个 ``state=ERROR`` 的工具结果喂回给
    模型，由模型自己重试；模型一直交不出来时以 ``EXCEED_MAX_ITERS`` 结束，
    ``structured_output`` 是 ``None``。
@@ -53,7 +53,7 @@ from src.llm.mock import MockChatModel
 
 #: 框架注册结构化输出工具时用的名字。
 #:
-#: ⚠️ 从框架源码核实（``agent/_structured_output_tool.py:45``），不是猜的。
+#: ⚠️ 从框架源码核实（``agentscope/agent/_structured_output_tool.py:45``），不是猜的。
 #: 写错它的后果是「模型永远交不出结构化结果」—— 而这条链路上
 #: **没有任何异常**，只是每次识别都降级成追问。
 STRUCTURED_TOOL_NAME = "GenerateStructuredOutput"
@@ -452,7 +452,7 @@ async def test_model_that_delivers_nothing_degrades_to_clarification() -> None:
 
     ⚠️ 这条路径在框架里**没有任何异常**：模型在 ``max_iters`` 之内始终没调
     ``GenerateStructuredOutput``，回复就以 ``EXCEED_MAX_ITERS`` 结束，
-    ``structured_output`` 是 ``None``（``agent/_agent.py:3580-3653``）。
+    ``structured_output`` 是 ``None``（``agentscope/agent/_agent.py:3580-3653``）。
     照「异常处理」的思路去写这段代码，就会漏掉它 —— 而漏掉的症状是
     ``AttributeError: 'NoneType' object has no attribute 'get'``，
     发生在整轮对话的主链路上，用户直接看到一次失败。

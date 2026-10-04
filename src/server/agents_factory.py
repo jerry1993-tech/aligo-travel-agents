@@ -22,7 +22,7 @@
     ``custom_subagent_templates`` 应用**构造期**读一次（**不是**可调用对象）
 
 前两个是**工厂**（``AgentToolFactory`` / ``AgentMiddlewareFactory``，
-``app/_types.py:21-36``），框架每次请求都会 await 它们；第三个是一个
+``agentscope/app/_types.py:21-36``），框架每次请求都会 await 它们；第三个是一个
 **静态列表**，框架在 ``create_app`` 里把它转成 dict 存进 ``app.state``。
 
 把静态列表写成工厂（或反过来）在类型上是错的，而且报错点离原因很远：
@@ -40,7 +40,7 @@
 ═══ ⚠️ 额外工具会加进**每一个** agent 的工具集 ═══
 
 ``get_toolkit`` 在通用运行路径上被无条件调用，工人（worker）、渠道会话、
-定时唤醒都走同一条路（``app/_service/_chat.py:1075-1092``）。也就是说
+定时唤醒都走同一条路（``agentscope/app/_service/_chat.py:1075-1092``）。也就是说
 这里返回的工具**不只是主智能体**能用。
 
 对业务工具来说这是可接受的（子智能体本来也需要查交通、查政策），
@@ -222,7 +222,7 @@ def build_tools_factory(
 
     ⚠️ 返回的是一个 **async 可调用对象**，不是列表
     （``AgentToolFactory = Callable[[str, str, str], Awaitable[list[ToolBase]]]``，
-    ``app/_types.py:33-36``）。返回列表会让框架在 ``tools += await factory(...)``
+    ``agentscope/app/_types.py:33-36``）。返回列表会让框架在 ``tools += await factory(...)``
     那一行报 ``TypeError: object list can't be used in 'await' expression``。
 
     ⚠️ 模型在**装配期**构造一次并复用，而不是每次请求构造一次：
@@ -361,7 +361,7 @@ class _AgentScopedMiddleware(MiddlewareBase):
 
     ⚠️ **为什么需要它**：``extra_agent_middlewares`` 返回的列表会被框架加进
     **每一个** agent 的装配 —— 主智能体、每个 worker、渠道会话、定时唤醒都走
-    同一条路（``app/_service/_chat.py:1075-1092``）。RAG 中间件因此会落到所有
+    同一条路（``agentscope/app/_service/_chat.py:1075-1092``）。RAG 中间件因此会落到所有
     agent 上，而 ``RAGMiddleware`` 的 ``list_tools`` 会给**每个** agent 塞一个
     ``search_knowledge`` 工具：那些根本不查政策的 worker 会看到一个它不会用的
     工具，白白占一段工具 schema，还可能被误调。
@@ -380,7 +380,7 @@ class _AgentScopedMiddleware(MiddlewareBase):
     所有 agent 的 agentic 工具**。
 
     ⚠️ **取舍二：按名字匹配是「尽力而为」**。worker 的 ``agent.name`` 是主
-    智能体在 ``AgentCreate`` 时**指定**的（``app/_tool/_agent_create.py:410``），
+    智能体在 ``AgentCreate`` 时**指定**的（``agentscope/app/_tool/_agent_create.py:410``），
     并不是模板类型名。因此名字对不上时 RAG **不生效** —— 这是安全的一侧：
     宁可不查，也不要给一个有知识库的 agent 之外的对象挂上检索。名字集合由
     :func:`build_middlewares_factory` 的 ``rag_agent_names`` 参数给出，需要
@@ -469,7 +469,7 @@ class _AgentScopedMiddleware(MiddlewareBase):
         （实测症状：`ReplyGuardMiddleware does not implement on_reasoning`，
         8/8 轮全崩，而所有单测全绿 —— 它们直接调 ``on_reply``，从不经过
         这层包装）。框架自己也是用 ``is_implemented`` 过滤钩子的
-        （``agent/_agent.py:236``），这里与它保持一致。
+        （``agentscope/agent/_agent.py:236``），这里与它保持一致。
 
         Args:
             agent (`Any`): 当前 agent。
@@ -504,16 +504,17 @@ def build_middlewares_factory(
     """构造 ``extra_agent_middlewares`` 工厂。
 
     ⚠️ 同样返回 **async 可调用对象**
-    （``AgentMiddlewareFactory``，``app/_types.py:21-27``）。
+    （``AgentMiddlewareFactory``，``agentscope/app/_types.py:21-27``）。
     框架支持两种签名：三参 ``(user_id, agent_id, session_id)`` 或四参
     （多一个 ``workspace``）。它用 ``inspect.signature().bind()`` 探测
-    **一次**（``app/_service/_chat.py:240-253``），所以选一种就固定了。
+    **一次**（``agentscope/app/_service/_chat.py:240-253``），所以选一种就固定了。
     本项目用三参 —— 中间件不使用工作区。
 
     ═══ ⚠️ 返回列表的**顺序就是执行顺序**，这里有硬约束 ═══
 
-    已核实：中间件列表的下标 0 是**最外层**（``agent/_agent.py:219-240``
-    按顺序存进各钩子的过滤列表，链式调用按列表顺序）。
+    已核实：中间件列表的下标 0 是**最外层**（``agentscope/agent/_agent.py:921-960``：
+    ``execute_chain`` 从下标 0 起、逐层包住后面的中间件；按序存进各钩子的
+    过滤列表见 ``:219-240``，``on_system_prompt`` 的顺序遍历见 ``:3235-3237``）。
 
     所以顺序是固定的六段（外加可选的 RAG），每一段的位置都有理由
     （第 6 段的「位置无影响」也是理由的一种）：
@@ -553,7 +554,7 @@ def build_middlewares_factory(
        放前面则会让后续中间件基于「已附加动态段落」的串继续改。
        ⚠️ 「链尾」的准确含义是**最后一个 ``on_system_prompt`` 实现者**，
        而不是「列表最后一格」：框架按 ``is_implemented("on_system_prompt")``
-       过滤后才组成串行链（``agent/_agent.py:236``），不实现的中间件
+       过滤后才组成串行链（``agentscope/agent/_agent.py:236``），不实现的中间件
        根本不进去。所以下面两个作用域包装可以安全地排在它后面。
     6. ``HintSuppressionMiddleware`` —— 紧跟上下文注入之后。
        ⚠️ 位置对它**没有语义影响**（它只实现 ``on_reply``，吃事件与位置
@@ -653,7 +654,7 @@ def build_middlewares_factory(
 
         # ⚠️ ``user_id`` **只**在这个闭包里用一次：装配长期画像解析器。
         # 它不是「顺手拿来用」，而是**唯一可信**的来源 ——
-        # 它由框架从鉴权结果取出后传入（``app/_service/_chat.py:240-253``），
+        # 它由框架从鉴权结果取出后传入（``agentscope/app/_service/_chat.py:994-1000``），
         # 与请求体、与模型输出都无关。若改成运行时从 agent 上读
         # （名字、某个 context 字段），就会得到「偶尔串到别人画像」的行为，
         # 而串号在多租户系统里是事故。

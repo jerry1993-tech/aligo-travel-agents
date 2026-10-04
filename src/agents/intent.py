@@ -32,9 +32,9 @@ P3 的方案里，子智能体分两类：
 
 ═══ ⚠️ 结构化输出走的是「工具调用」，不是 JSON mode ═══
 
-已核实（``agent/_agent.py:1126-1132``）：设了 ``structured_schema`` 之后，
+已核实（``agentscope/agent/_agent.py:1126-1132``）：设了 ``structured_schema`` 之后，
 框架会把 schema 注册成一个名字叫 ``GenerateStructuredOutput`` 的内置工具
-（``agent/_structured_output_tool.py:45``），模型**调用它**来交付结果，
+（``agentscope/agent/_structured_output_tool.py:45``），模型**调用它**来交付结果，
 框架校验后把结果存进 ``Msg.structured_output``。
 
 这条事实有三个直接后果，每一条都写在了下面的代码里：
@@ -47,7 +47,7 @@ P3 的方案里，子智能体分两类：
 3. 交付物是 **``Msg.structured_output``（一个 dict）**，不是消息正文。
    框架最后那条消息的正文是固定的
    ``"The required structured output is generated."``
-   （``agent/_agent.py:3568-3577``），照着正文解析会稳定地解析出一句英文。
+   （``agentscope/agent/_agent.py:3568-3577``），照着正文解析会稳定地解析出一句英文。
 
 ═══ ⚠️ 每次识别都新建一个 Agent 实例 ═══
 
@@ -71,12 +71,12 @@ P3 的方案里，子智能体分两类：
 
 - 框架在每次非人工确认的 ``reply`` 开始时，把整个 ``reply_context``
   **整体替换**掉，``structured_output`` 被硬置回 ``None``
-  （``agent/_agent.py:1111-1116``）。它没有「残留」的机会。
+  （``agentscope/agent/_agent.py:1111-1116``）。它没有「残留」的机会。
 - 本模块也从**不**读 ``state.reply_context.structured_output`` ——
   它读的是**返回消息上**的那个字段（``getattr(message,
   "structured_output", None)``，见 ``recognize`` 里那一行）。
   而失败路径下框架构造的那条 ``exit_msg`` **根本不含**这个字段
-  （``agent/_agent.py:3614-3621``），所以无论复用与否读到的都是 ``None``。
+  （``agentscope/agent/_agent.py:3614-3621``），所以无论复用与否读到的都是 ``None``。
 - 实测：复用同一个 ``Agent`` 连跑两次，第一次成功、第二次失败，
   第二次读到的确实是 ``None``（降级成「追问」），没有拿到上一次的意图。
 
@@ -250,7 +250,7 @@ class IntentRecognizer:
         message = await agent.reply(
             inputs=Msg(name="user", role="user", content=[TextBlock(text=prompt)]),
             # ⚠️ ``structured_schema`` 是**每次调用**的参数，不是构造参数
-            # （``agent/_agent.py:332-341``）。构造时没有这个口子。
+            # （``agentscope/agent/_agent.py:332-341``）。构造时没有这个口子。
             structured_schema=IntentRecognitionResult,
         )
 
@@ -259,7 +259,7 @@ class IntentRecognizer:
             # ⚠️ 走到这里说明模型在 ``max_iters`` 之内始终没能调用
             # ``GenerateStructuredOutput``。框架此时**不报错**，
             # 只是回复以 ``EXCEED_MAX_ITERS`` 结束且 ``structured_output``
-            # 为 ``None``（``agent/_agent.py:3580-3653``）。
+            # 为 ``None``（``agentscope/agent/_agent.py:3580-3653``）。
             logger.warning(
                 "意图识别没有得到结构化结果（模型可能在迭代上限内未交付），本轮降级为追问。",
             )
@@ -268,7 +268,7 @@ class IntentRecognizer:
         # ⚠️ 这里是**二次校验**。框架在 ``GenerateStructuredOutput`` 内部
         # 已经用同一个 schema 校验过一次了，照理不该失败。但仍然要接住：
         # 框架允许 ``structured_schema`` 是一个 **JSON schema dict**
-        # （``state`` 重载后的形态，见 ``agent/_structured_output_tool.py:141-155``），
+        # （``state`` 重载后的形态，见 ``agentscope/agent/_structured_output_tool.py:141-155``），
         # 那条路径用的是「默认值填充」式的宽松校验，严格程度与本类的
         # pydantic 校验不同。二次校验把「框架认为合法」和「我们认为合法」
         # 这两个标准之间的距离显式化，而不是让它以 ``KeyError`` 的形式

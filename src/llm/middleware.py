@@ -36,12 +36,12 @@
 （于是能短路）。
 
 ⚠️ 权限判断**不在** ``on_acting`` 上做，尽管名字看起来更像。
-``on_acting`` 只包住 ``call_tool`` 这个纯 I/O 层（``agent/_agent.py:2719``），
+``on_acting`` 只包住 ``call_tool`` 这个纯 I/O 层（``agentscope/agent/_agent.py:2719``），
 在它上面拦工具调用会连框架自己的记账与事件都一起绕过。
 
 ═══ ⚠️ ``next_handler`` 必须被调用，且必须用关键字传参 ═══
 
-已核实（``agent/_agent.py:3365-3371``）：``on_model_call`` 的返回值就是
+已核实（``agentscope/agent/_agent.py:3365-3371``）：``on_model_call`` 的返回值就是
 整条链的返回值。**不调用 ``next_handler`` 就等于真实模型永远不会被调用**
 （快车道正是利用这一点短路的）。
 
@@ -73,7 +73,7 @@ kwargs **合并**到捕获的 ``input_kwargs`` 上再往下传。所以必须写
     · 没有 `client_kwargs` ⇒ openai SDK 用**默认超时 600s**；
     · 没有降 `max_retries` ⇒ openai SDK 默认再自己重试 2 次（3 次尝试）；
     · 框架 `ChatModelBase.__call__` 自己又重试 `max_retries=3`
-      （`model/_base.py:207` 的 `range(self.max_retries + 1)` ⇒ 4 轮）。
+      （`agentscope/model/_base.py:208` 的 `range(self.max_retries + 1)` ⇒ 4 轮）。
 
 最坏情况 ≈ 4 × 3 × 600s = **2 小时**：一次卡住的模型调用可以让请求挂到
 天荒地老。中间件挂在链上，是 app 链路唯一能收口的地方（离线脚本由
@@ -124,7 +124,7 @@ def _model_label(input_kwargs: dict[str, Any]) -> str:
     ⚠️ 为什么用 ``getattr`` 兜底而不是直接 ``input_kwargs["current_model"].model``：
 
     1. 键可能不在。``on_model_call`` 的 ``input_kwargs`` 由框架组装
-       （``agent/_agent.py:3347-3352``），但本中间件也可以被别的调用方挂到
+       （``agentscope/agent/_agent.py:3347-3352``），但本中间件也可以被别的调用方挂到
        别的链上 —— 那时少一个键就是 ``KeyError``，
        **一个纯观测动作绝不该让真实请求失败**；
     2. 值可能不是模型。已核实：框架传的是 ``ChatModelBase`` 实例，但单测里
@@ -316,10 +316,10 @@ class BreakerMiddleware(MiddlewareBase):
         「调用」与「拿到结果」是分开的两次操作：
 
         1. ``await current_model(...)`` 只是**建出**一个异步生成器，
-           不做任何 I/O（已核实：``model/_base.py:254-290`` 返回 ``_stream()``；
-           ``agent/_agent.py:3339-3343`` 是 ``return await current_model(...)``）；
+           不做任何 I/O（已核实：``agentscope/model/_base.py:254-290`` 返回 ``_stream()``；
+           ``agentscope/agent/_agent.py:3339-3343`` 是 ``return await current_model(...)``）；
         2. 真正的网络请求发生在框架**迭代**这个生成器的时候
-           （``agent/_agent.py:1744-1757`` 的 ``async for chunk in res``）。
+           （``agentscope/agent/_agent.py:1744-1757`` 的 ``async for chunk in res``）。
 
         于是「``await next_handler(...)`` 没抛异常」**不等于**「模型调用成功」
         —— 上游挂掉、超时、鉴权失败，全都发生在上面的第 2 步，
@@ -387,13 +387,13 @@ def _open_response() -> ChatResponse:
 
     ⚠️ 用 ``ChatResponse``（dataclass）而不是伪造一个模型对象：
     ``on_model_call`` 的返回类型是 ``ChatResponse | AsyncGenerator[ChatResponse, None]``
-    （注解在 ``agent/_agent.py:3336``，调用点在 ``:3365-3371``）。
+    （注解在 ``agentscope/agent/_agent.py:3336``，调用点在 ``:3365-3371``）。
     我们取前一支 —— 返回别的东西（比如一个鸭子类型的假对象），
     框架会在这个钩子之后的某一行崩掉，而堆栈指向框架内部而非本模块。
 
     ⚠️ ``is_last=True`` 在这条路径上是**防御性**的，不是承重的。
     已核实，框架只在**流式**分支上读它
-    （``agent/_agent.py:1746-1748`` 的 ``async for chunk in res: if chunk.is_last``），
+    （``agentscope/agent/_agent.py:1746-1748`` 的 ``async for chunk in res: if chunk.is_last``），
     而一个裸 ``ChatResponse`` 走的是 ``isinstance(res, ChatResponse)``
     （``:1759-1760``）那一支，**根本不会读** ``is_last``。
     所以漏掉它在这里不会「卡住不结束」—— 那种说法是错的，别照着它推理。
@@ -573,9 +573,9 @@ class ModelTimeoutMiddleware(MiddlewareBase):
         而框架的模型层**故意吞掉** ``CancelledError``（把它转成一次优雅的
         「被打断」）：
 
-          · 非流式：``model/_base.py:224-230`` 返回一个
+          · 非流式：``agentscope/model/_base.py:219-224`` 返回一个
             ``finished_reason=INTERRUPTED`` 的空响应；
-          · 流式：``model/_base.py:255-270`` 把取消转成一个末尾分片。
+          · 流式：``agentscope/model/_base.py:283-288`` 把取消转成一个末尾分片。
 
         于是超时取消会被优雅地接住，``wait_for`` 看到的是「正常返回」，
         超时判定**永远不成立** —— 护栏在纸面上存在、实际一次都不触发。

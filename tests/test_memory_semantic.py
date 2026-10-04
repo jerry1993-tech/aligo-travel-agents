@@ -132,7 +132,7 @@ class FakeVectorStore:
     async def create_collection(self, name: str, dimensions: int) -> None:
         """幂等建集合 —— 与框架 ``MilvusLiteStore.create_collection`` 同形。
 
-        ⚠️ 已存在时是 **no-op**（``rag/_vdb/_milvus_lite.py:129-131``）。
+        ⚠️ 已存在时是 **no-op**（``agentscope/rag/_vdb/_milvus_lite.py:129-131``）。
         用例靠这个语义断言「每次写入都调一次 ensure」既是安全的、
         也不会把已有数据清掉。
         """
@@ -294,7 +294,7 @@ def test_the_note_id_is_deterministic_across_processes() -> None:
 def test_the_note_id_fits_the_primary_key_width() -> None:
     """id 必须是 64 位十六进制。
 
-    ⚠️ Milvus 的主键是 ``VARCHAR(64)``（``_milvus_lite.py:133-160``）。
+    ⚠️ Milvus 的主键是 ``VARCHAR(64)``（``agentscope/rag/_vdb/_milvus_lite.py:133-160``）。
     超长的 id 会在**写入时**才被拒绝，而那条路径是用户明确要求
     「记住这个」的时候 —— 失败信息还是一条 Milvus 的参数错误。
     ``sha256`` 的十六进制摘要正好 64 位，是刻意的选择。
@@ -377,7 +377,7 @@ def test_the_written_metadata_is_flat_and_scoped(memory: SemanticMemory, store: 
     """写进去的 metadata 只有**两个扁平的字符串键**。
 
     ⚠️ ``metadata_filter`` 走到 Milvus 那边是 ``metadata["k"] == "v"``
-    拼出来的表达式（``_milvus_lite.py:504-515``），**只支持等值**。
+    拼出来的表达式（``agentscope/rag/_vdb/_milvus_lite.py:504-515``），**只支持等值**。
     塞一个列表或嵌套 dict 进去不会当场报错 —— 它会在检索时
     拼出一句非法表达式，那次搜索整个失败。
     """
@@ -393,7 +393,7 @@ def test_the_written_metadata_is_flat_and_scoped(memory: SemanticMemory, store: 
 def test_the_chunk_carries_a_text_block_not_a_string(memory: SemanticMemory, store: FakeVectorStore) -> None:
     """``Chunk.content`` 是 ``TextBlock``，不是 ``str``。
 
-    ⚠️ 传裸字符串会直接 ``ValidationError``（``rag/_document.py:80-82``）。
+    ⚠️ 传裸字符串会直接 ``ValidationError``（``agentscope/rag/_document.py:80-82``）。
     这条断言写下来是因为它**已经犯过一次**，而报错信息指向 pydantic
     的联合类型，不看文档很难反应过来。
     """
@@ -664,7 +664,7 @@ def test_ensuring_the_collection_is_idempotent(settings: Settings) -> None:
     """★★ 第二次写入不会因为「重复建集合」丢掉第一条笔记。
 
     ⚠️ 幂等性的真正考验不是「第二次不报错」，而是**不覆盖数据**：
-    框架的 ``create_collection`` 已存在时是 no-op（``_milvus_lite.py:129-131``），
+    框架的 ``create_collection`` 已存在时是 no-op（``agentscope/rag/_vdb/_milvus_lite.py:129-131``），
     本用例把这条语义变成断言 —— 若哪天有人把实现换成
     ``delete_collection`` + ``create_collection``，这里立刻变红。
     """

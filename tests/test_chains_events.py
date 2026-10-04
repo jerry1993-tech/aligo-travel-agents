@@ -65,7 +65,7 @@ REPLY_ID = "reply-1"
 def as_dict(event: Any) -> dict[str, Any]:
     """把事件转成服务层在总线上发布的形态。
 
-    ⚠️ 与 ``app/_service/_chat.py:1345-1350`` 的做法**一致**
+    ⚠️ 与 ``agentscope/app/_service/_chat.py:1355-1359`` 的做法**一致**
     （``model_dump(mode="json")``），不是随手 ``model_dump()`` ——
     前者会把 ``ToolResultState`` 变成字符串、时间戳变成 ISO 串，
     那正是适配器要面对的形态。
@@ -269,7 +269,7 @@ def test_every_registered_tool_has_a_title() -> None:
 def test_arguments_are_assembled_from_fragments(adapter, collector, driver) -> None:
     """★★ 参数从 ``TOOL_CALL_DELTA`` 分片拼出来，且解析成字典。
 
-    ⚠️ 参数是**分片**到达的（``event/_event.py:313-347``），
+    ⚠️ 参数是**分片**到达的（``agentscope/event/_event.py:313-347``），
     ``TOOL_CALL_END`` 里**没有**参数。把 ``collector.plan()`` 放在
     ``TOOL_CALL_START`` 上（那时参数还没到）会登记出一批 ``arguments={}``
     的任务 —— 界面展开详情时永远是空的，而展开详情正是用户点开
@@ -553,7 +553,7 @@ def test_each_confirmation_event_carries_exactly_one_call(adapter, collector, dr
     ⚠️ 这条守的是一个**几乎不可能猜对**的框架细节：框架对每一个被挂起的
     工具调用**各发一条** ``RequireUserConfirmEvent``，且
     ``tool_calls=[tool_call]`` 的长度**恒为 1**
-    （``agent/_agent.py:2574-2577``）。
+    （``agentscope/agent/_agent.py:2574-2577``）。
 
     所以「有几项待确认」如果取 ``len(tool_calls)``，它永远是 1 ——
     界面会在有 5 个调用等人确认时写着「等待你确认 1 项操作」。
@@ -618,7 +618,7 @@ def test_a_continuation_reply_start_keeps_the_pending_confirmation(
     """★★ 同一 ``reply_id`` 的**续接** ``REPLY_START`` 不得收掉待确认的任务。
 
     框架在人工确认之后会补发一个 ``reply_id`` **与暂停前相同**的
-    ``ReplyStartEvent``（``app/_service/_chat.py:1332-1341``），框架的注释
+    ``ReplyStartEvent``（``agentscope/app/_service/_chat.py:1329-1344``），框架的注释
     明确要求消费者「不得因为收到相同 ``reply_id`` 的 ``REPLY_START`` 就清空
     累积的缓冲区」。
 
@@ -713,7 +713,7 @@ def test_an_approval_says_how_many_were_confirmed(adapter, collector, driver) ->
     """★★ 确认文案里的**数字必须对**。
 
     ⚠️ 这条守的是一个曾经真实存在的字段名错误：判据字段是
-    ``ConfirmResult.confirmed``（``event/_event.py:468-473``），
+    ``ConfirmResult.confirmed``（``agentscope/event/_event.py:468-473``），
     不是 ``approved``。写错名字的后果是 ``getattr(item, "approved", False)``
     永远取到 ``False`` —— 用户点了同意，界面显示「已确认 0/1 项操作」。
     不报错、不告警，只是在最关键的那一步上主动误导人。
@@ -761,7 +761,7 @@ def test_a_confirm_result_without_a_pending_task_is_ignored(adapter, collector, 
 def test_a_reply_start_with_the_same_reply_id_keeps_the_state(adapter, collector, driver) -> None:
     """★★★ 同一个 ``reply_id`` 的 ``REPLY_START`` 是**续接**，状态必须留着。
 
-    已核实（``app/_service/_chat.py:1332-1341``）：HITL 确认之后，服务层会
+    已核实（``agentscope/app/_service/_chat.py:1329-1344``）：HITL 确认之后，服务层会
     补发一个 ``reply_id`` **与暂停前相同**的 ``ReplyStartEvent``，框架自己的
     注释写着「SSE 处理器**不得**因为收到相同 ``reply_id`` 的 ``REPLY_START``
     就清空累积的缓冲区 —— 这个事件表示续接，不是新回复」。
@@ -883,7 +883,7 @@ def test_a_completed_reply_leaves_running_tasks_alone(adapter, collector, driver
 def test_reply_end_with_exceed_max_iters_fails_running_tasks(adapter, collector, driver) -> None:
     """★★★ ``EXCEED_MAX_ITERS`` 收尾在途任务 —— 走 ``ReplyEndEvent``。
 
-    ⚠️ 这是**正路**。已核实（``event/_event.py:425-431``）：
+    ⚠️ 这是**正路**。已核实（``agentscope/event/_event.py:425-431``）：
     ``ExceedMaxItersEvent`` 带 ``@deprecated``，文档写着「仍为向后兼容而
     发出，但**不携带语义**；请改用 ``ReplyEndEvent.finished_reason``」。
     只认那个废弃事件，等于把「任务收尾」押在一个已宣布会消失的事件上 ——
@@ -912,7 +912,7 @@ def test_reply_end_with_exceed_max_iters_fails_running_tasks(adapter, collector,
 def test_the_deprecated_exceed_event_still_works(adapter, collector, driver) -> None:
     """★★ 废弃的 ``EXCEED_MAX_ITERS`` 事件**仍然**收尾（向后兼容）。
 
-    ⚠️ 本地版本两处都发（``agent/_agent.py:3599`` 等），旧版本框架只发这一个。
+    ⚠️ 本地版本两处都发（``agentscope/agent/_agent.py:3599`` 等），旧版本框架只发这一个。
     两条路都要通，否则升级/降级框架时会有一边静默失效。
     """
     import warnings
@@ -1022,7 +1022,7 @@ def test_an_error_does_not_touch_a_task_waiting_for_the_user(adapter, collector,
 def test_an_interrupted_reply_does_not_force_finish(adapter, collector, driver) -> None:
     """★★ ``INTERRUPTED`` **不**强行收尾 —— 框架已经补发过工具结果了。
 
-    ⚠️ 已核实（``agent/_agent.py:1008-1031``）：中断时框架会为每个在途调用
+    ⚠️ 已核实（``agentscope/agent/_agent.py:1008-1031``）：中断时框架会为每个在途调用
     补发 ``TOOL_RESULT_START`` + ``INTERRUPTED`` 的 ``TOOL_RESULT_END``。
     适配器照常收成 ``FAILED``，走的是一般路径 —— 不需要、也不该有第二条
     收尾逻辑（两条路都在写同一个任务，会重复通知监听器）。

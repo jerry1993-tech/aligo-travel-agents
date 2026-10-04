@@ -12,7 +12,7 @@
 
 ═══ 全部是只读工具，全部走 ``is_read_only=True`` ═══
 
-这一条不是可选的优化，而是**必须**的设置。已核实（``tool/_adapters.py:116-135``）：
+这一条不是可选的优化，而是**必须**的设置。已核实（``agentscope/tool/_adapters.py:116-135``）：
 ``FunctionTool`` 的 ``permission`` 默认是 ``None``，而 ``None`` 会被解释成
 ``PermissionDecision(behavior=ASK)`` —— 于是**每一个**自定义工具调用都会
 弹一次用户确认。
@@ -22,7 +22,7 @@
 快速通道，**在工具自身的权限判定之前**直接放行。
 
 ⚠️ 快速通道的准确位置（已逐行核实，先前这里引用错了行号）：
-``permission/_engine.py:659-687`` 是共享的 ``_check_read_only_fast_path``，
+``agentscope/permission/_engine.py:659-687`` 是共享的 ``_check_read_only_fast_path``，
 ``_check_default`` 在 ``:170`` 调用它（步骤 3），位于「工具自身的
 ``check_permissions``」**之前**。该函数的 docstring 明确写着
 「auto-allowed in **every** PermissionMode」—— 所以这条快速通道在默认模式下

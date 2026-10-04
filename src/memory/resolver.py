@@ -112,7 +112,7 @@ def make_memory_resolver(
 
     ⚠️ ``user_id`` 是**装配时捕获**的，不是运行时从 agent 上读的。
     中间件工厂（``AgentMiddlewareFactory``）被框架调用时会把
-    ``user_id`` 作为参数传进来（``app/_service/_chat.py:240-253``），
+    ``user_id`` 作为参数传进来（``agentscope/app/_service/_chat.py:994-1000``），
     那是**唯一**可信的来源。从 agent 上猜（比如读它的名字或某个
     context 字段）会得到「看起来能用、偶尔串到别人画像」的行为 ——
     而串号在多租户系统里是事故。

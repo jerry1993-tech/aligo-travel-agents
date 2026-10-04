@@ -6,17 +6,35 @@
 #           安装；被本机开发环境以同一份清单安装，从而保证「本地跑得过 = 容器跑得过」。
 #   - 下游：`src/` `scripts/` `tests/` 全部代码 import 的第三方能力都出自这里。
 #
+# 安装方式（唯一入口，本机与容器完全相同）：
+#     pip install -r requirements.txt
+#   两个框架包（第 零 节）与它们的全部依赖都在本清单里 ——
+#   不需要 clone 任何源码仓库，也没有第二条安装路径。
+#
 # ------------------------------------------------------------------------------
-# 【为什么这份清单必须「显式列全」，而不能靠 pip 自动解析】
+# 【两个框架包：从包索引安装，不在仓库里 vendored 源码】
 # ------------------------------------------------------------------------------
-# Dockerfile 第 56 行用 `pip install --no-deps --no-build-isolation` 安装两个
-# **本地源码包**（third_party/agentscope 与 third_party/ReMe）：
-#     `--no-deps` 的含义是「只装这两个包本身，**不要**去解析它们的依赖」。
-# 这么做的理由见 Dockerfile 该段注释（避免解析出与本地开发环境不一致的版组合）。
-# 代价是：**这两个包在各自 pyproject.toml 里声明的依赖，pip 一个都不会装** ——
-# 少写一条，容器启动时就是一句难以归因的 `ModuleNotFoundError`。
-# 因此下面第 一、二 节的条目，是从两份 pyproject.toml 的 `dependencies` 与
-# 我们实际启用的 `optional-dependencies` 逐条誊抄而来的，**不是**凭印象写的。
+# 第 零 节的 `agentscope` / `reme-ai` 是**普通的 pip 包**，从包索引安装
+# （本机经镜像源、容器内经 Dockerfile 的 PIP_INDEX_URL）。
+# 因此：
+#   · 仓库里**没有** AgentScope / ReMe 的源码树；
+#   · `import agentscope` / `import reme` 由安装元数据解析到当前环境的
+#     `site-packages`（核验命令见 README 的「快速开始」）；
+#   · 本机与容器装的是同一份钉版清单，不存在「本地一套、容器另一套」。
+#
+# 为什么钉这两个版本（2026-10-04 决议）：
+#   · agentscope==2.0.9 是索引上的最新发行版（开发中的 2.0.10dev 只存在于
+#     开发分支、不在索引上）；本项目的全部 2025 个测试用例在该版本上实测通过；
+#   · reme-ai==0.4.1.12 同为索引上最新，是 ReMe 可选记忆开关的实际运行版本。
+#
+# ------------------------------------------------------------------------------
+# 【为什么依赖要逐条列出并精确钉版】
+# ------------------------------------------------------------------------------
+# 两个框架包的依赖，pip 本可以自行解析 —— 之所以仍然逐条抄录、钉死：
+#   1) 复现性：本清单钉住的正是「测试全绿」的那一组版本；浮动版本会让
+#      「本地绿、容器红」这类问题无法复现；
+#   2) 显式性：少一条、错一版时，报错落在本文件这一层，而不是运行时的
+#      一句 ModuleNotFoundError（Docker 构建期尤甚，归因成本高）。
 #
 # 已启用的 agentscope extras（对应下面的分节）：
 #   service        —— FastAPI 服务层（create_app 的宿主）
@@ -30,28 +48,35 @@
 #   tools          —— 只含 `ripgrep>=14.1,<15`，**必须排除**：它只发布了
 #                     macOS-arm64 与 manylinux_2_39 的 wheel，而本镜像基于
 #                     python:3.11-slim（Debian bookworm，glibc 2.36）⇒ 拿不到 wheel
-#                     ⇒ 回落到 Rust sdist ⇒ 构建期**必然失败**（该风险由上游 pyproject
-#                     自己的注释写明）。本项目不使用内置 Grep 工具，故不装。
+#                     ⇒ 回落到 Rust sdist ⇒ 构建期**必然失败**（该风险由上游包
+#                     元数据自己的注释写明）。本项目不使用内置 Grep 工具，故不装。
 #   rag            —— 文档解析器（pdf/pptx/docx/xlsx），P4 灌知识库时再按需追加，
 #                     理由见文末「P4 追加」一节：这些库的重导入都在方法内部
-#                     （`rag/_parser/_pdf.py:66` 等），不装也不影响 import。
+#                     （`agentscope/rag/_parser/_pdf.py:66` 等），不装也不影响 import。
 #   tui / a2a / realtime / memory-mem0 —— 本项目用不到
 #
 # ------------------------------------------------------------------------------
 # 【关于版本钉法】
 # ------------------------------------------------------------------------------
-# 一律用 `==` **精确钉死**到本机已装、且已被实际跑通的版本（取证命令：`pip list`）。
-# 不用 `>=`：本项目已多次踩到「上游同名不同码」的坑（见 README「三条硬性约定」），
+# 一律用 `==` **精确钉死**到已被实际跑通的版本（取证命令：`pip list`）。
+# 不用 `>=`：本项目要求「同一份清单在本地与容器得到同一组版本」，
 # 浮动版本会让「本地绿、容器红」这类问题无法复现。改版本请连同本文件上方的
 # 分节注释一起复核。
 # ==============================================================================
 
 
 # ------------------------------------------------------------------------------
-# 一、AgentScope 运行时依赖（誊自 third_party/agentscope/pyproject.toml 的 dependencies）
+# 零、两个框架本体（从包索引安装的 pip 包，非 vendored 源码）
 # ------------------------------------------------------------------------------
-# ⚠️ 一个都不能少：Dockerfile 用 --no-deps 装 agentscope 本体，这里漏一条就等于
-#    容器里少了那条依赖。
+agentscope==2.0.9               # 多智能体框架：Agent / 中间件 / 工具 / 事件流 / app 服务层
+reme-ai==0.4.1.12               # 长期记忆库。⚠️ 发行名是 reme-ai，**导入名是 reme**，两者不同
+
+
+# ------------------------------------------------------------------------------
+# 一、AgentScope 运行时依赖（随 agentscope==2.0.9 的元数据声明；此处显式钉版）
+# ------------------------------------------------------------------------------
+# 本节每一条都是框架元数据要求安装的运行时依赖；显式列出并钉死，
+# 保证与「2025 个用例全绿」的那一版环境逐条一致。
 aioitertools==0.13.0            # 异步迭代工具（框架内部对 async generator 做 tee/zip）
 anthropic==1.8.0                # Anthropic 模型客户端（框架 Model 层统一抽象的一部分）
 dashscope==1.27.6               # 阿里云百炼 SDK：本项目 Embedding 三合一里的 DashScope 通道
@@ -82,11 +107,11 @@ tzdata==2026.4                  # IANA 时区库：slim 镜像与 Windows 上**�
 
 
 # ------------------------------------------------------------------------------
-# 二、ReMe 运行时依赖（誊自 third_party/ReMe/pyproject.toml 的 dependencies）
+# 二、ReMe 运行时依赖（随 reme-ai==0.4.1.12 的元数据声明；此处显式钉版）
 # ------------------------------------------------------------------------------
 # ReMe 是**可选**的长期记忆库（甲方决策：自研画像为主，ReMe 作默认关闭的开关）。
-# 即便如此它的依赖也要装全：`agentscope.middleware.ReMeMiddleware` 一旦被 import
-# 就会拉起 reme，缺依赖会以 ModuleNotFoundError 直接炸掉整个中间件装配。
+# 即便如此它的依赖也要装全：开关打开并真正用起来时会 import reme，
+# 缺依赖会以 ModuleNotFoundError 的形式出现在**第一次对话**（而不是启动时）。
 # ⚠️ 其 `core` extra 里的 faiss-cpu / neo4j / jieba / zvec / claude-agent-sdk 等
 #    **不需要**：它们不在 base dependencies 里，且本项目不用那些后端。
 croniter==6.2.4                 # cron 表达式解析（记忆的定时整理）
@@ -94,18 +119,19 @@ croniter==6.2.4                 # cron 表达式解析（记忆的定时整理�
 #    反向钉死」的地方，把原因写清楚，免得后人顺手升级后又踩一次：
 #      · fastmcp 4.0.x 的元包**无条件**依赖 `fastmcp-slim[client,server]==4.0.x`，
 #        而该 slim 包在 client / server 两个 extra 上都要求 `mcp>=2.0.0,<3.0.0`；
-#      · 但 agentscope（`third_party/agentscope/pyproject.toml:29`）要求 `mcp<2.0.0`，
-#        本文件第 62 行据此钉了 `mcp==1.30.0`。
-#      ⇒ 4.x 与 agentscope 的要求**在区间上不可能同时满足**：Dockerfile 第 48 行是
-#        一次 `pip install -r` 整体求解，于是直接以 ResolutionImpossible 失败
+#      · 但 agentscope==2.0.9 的安装元数据要求 `mcp<2.0.0`（核验：
+#        `importlib.metadata.requires("agentscope")` 中可见 `mcp<2.0.0`），本文件第 87 行据此钉了 `mcp==1.30.0`。
+#      ⇒ 4.x 与 agentscope 的要求**在区间上不可能同时满足**：Dockerfile 是一次
+#        `pip install -r` 整体求解，于是直接以 ResolutionImpossible 失败
 #        （2026-09-24 `make up` 实测报错原文：
 #         "Cannot install fastmcp-slim[client,server]==4.0.5 and mcp==1.30.0 ..."）。
 #      · 而 fastmcp 3.4.x 的 slim 包要求 `mcp<2.0,>=1.24.0` —— 与 agentscope 的要求
 #        **区间相容**，`mcp==1.30.0` 同时落在两者之内，冲突就此消解。
-#      · ReMe 自己声明的是 `fastmcp>=3.1.0`（`third_party/ReMe/pyproject.toml:27`），
-#        3.4.7 满足；且 ReMe 对 fastmcp 的 import **全部写在函数体内的惰性 import**
-#        （`grep -rn 'from fastmcp' third_party/ReMe/reme/` 可见），`import reme` 本身
-#        根本不触碰 fastmcp，所以降这一档不会让「默认关闭的 ReMe 开关」变成坏开关。
+#      · ReMe 自己声明的约束是 `fastmcp>=3.1.0`（核验：`importlib.metadata
+#        .requires("reme-ai")` 中可见 `fastmcp>=3.1.0`），3.4.7 满足；且 ReMe 对 fastmcp 的 import **全部写在函数
+#        体内的惰性 import**（对已安装的 reme 包 grep `from fastmcp` 可见），
+#        `import reme` 本身根本不触碰 fastmcp，所以降这一档不会让
+#        「默认关闭的 ReMe 开关」变成坏开关。
 #    已验证（2026-10-01，非推断）：容器内 `mcp==1.30.0 + fastmcp==3.4.7` 下，ReMe 实际
 #    用到的 13 个 fastmcp 符号（FastMCP / Client / ToolError / FunctionTool / Transport /
 #    combine_lifespans / SSETransport / StdioTransport / StreamableHttpTransport /
@@ -148,7 +174,7 @@ greenlet==3.5.6                 # SQLAlchemy 异步模式的必需底座（缺�
 # 本项目唯一向量库（甲方拍板：不提供 pgvector 备选）。
 # ⚠️ 不装 milvus-lite：它只在「本地 .db 文件」模式下需要，而我们的
 #    MilvusLiteStore 连的是 compose 里的远端 Milvus（http://milvus:19530），
-#    判定见 third_party/agentscope/src/agentscope/rag/_vdb/_milvus_lite.py 的 _is_local_db_uri()。
+#    判定见 agentscope/rag/_vdb/_milvus_lite.py:539-543 的 _is_local_db_uri()。
 pymilvus==3.0.2                 # 与 docker-compose.yaml 里 milvusdb/milvus:v3.0.2 **同代**
 
 
@@ -183,7 +209,7 @@ anyio==4.15.1                   # 异步后端抽象（httpx / starlette TestCli
 # 文档解析器（对应 agentscope 的 `rag` extra，按需取用）：
 # python-docx                     # Word：差旅政策最可能的上传格式
 # openpyxl                        # Excel：费用标准表
-# pandas                          # ExcelParser 的默认读取路径（rag/_parser/_excel.py:63）
+# pandas                          # ExcelParser 的默认读取路径（agentscope/rag/_parser/_excel.py:244-257）
 # python-pptx                     # PPT：培训材料（优先级最低）
 # xlrd                            # 旧版 .xls（优先级最低）
 #

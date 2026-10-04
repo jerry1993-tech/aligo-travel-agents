@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """AliGo 差旅助手 —— 应用源码包。
 
-本包是**我们自己的代码**，与 ``third_party/`` 里 vendored 的 AgentScope / ReMe
-源码树严格分开：
+本包是**我们自己的代码**。框架依赖（``agentscope`` / ``reme``）自 2026-10-04 起
+是**普通的 pip 包**（钉在 ``requirements.txt`` 第 零 节），与 ``src`` 严格分开：
 
-    · ``agentscope`` / ``reme`` 由**安装元数据**解析（本机是 editable 安装，
-      容器里是 Dockerfile 构建期 ``pip install`` 进 ``/opt/venv`` 的 site-packages）。
-      因此本项目**不设** ``PYTHONPATH=third_party/...``，也不要那样做 ——
+    · ``agentscope`` / ``reme`` 由**安装元数据**解析到当前 Python 环境的
+      ``site-packages``（核验：``python -c "import agentscope; print(agentscope.__file__)"``）。
+      仓库里不再有 vendored 源码树，也**不设**任何指向源码树的 ``PYTHONPATH`` ——
       一旦同时存在两条解析路径，"实际加载的是哪一份代码"就变得不确定。
     · ``src`` 是本项目的顶层包，靠 ``PYTHONPATH=<仓库根>`` 解析
       （容器里由 Dockerfile 的 ``ENV PYTHONPATH=/app`` 提供）。

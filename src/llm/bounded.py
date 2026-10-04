@@ -7,7 +7,7 @@
 箍住了向量模型，但开了重排（``ALIGO__RERANK__ENABLED=true``）之后，一次检索
 还有**第三段**调用：
 
-    框架 ``_rerank_results``（``middleware/_rag.py:454``）::
+    框架 ``_rerank_results``（``agentscope/middleware/_rag.py:518``）::
 
         response = await rerank_model.generate_structured_output(   # ← 本模块覆盖这里
             messages=[...],
@@ -15,15 +15,15 @@
         )
 
 它的调用**在返回给用户的那条链路上**（``RAGMiddleware.on_reasoning``，
-``_rag.py:319``）。没有任何一层给它设截止时间：
+``agentscope/middleware/_rag.py:971-979``）。没有任何一层给它设截止时间：
 
   · ``ModelTimeoutMiddleware`` 只管 ``on_model_call`` —— 那是**agent 自己**的
     模型调用，重排是中间件在 ``on_reasoning`` 里另起的一次调用，不经过那个钩子；
-  · 框架给重排的 ``except Exception``（``_rag.py:433-445``）只在**抛异常**时
+  · 框架给重排的 ``except Exception``（``agentscope/middleware/_rag.py:439-445``）只在**抛异常**时
     才回退到向量序，而「卡住不返回」永远不抛异常；
   · SDK 层的 ``timeout``（``src/llm/factory.py`` 的 ``client_kwargs``）箍的是
     **单次 HTTP 请求**，而 ``generate_structured_output`` 内部是一条
-    **策略阶梯 + 重试**（``model/_base.py:457-490``：forced → auto →
+    **策略阶梯 + 重试**（``agentscope/model/_base.py:457-490``：forced → auto →
     no_think → none 四种策略，每种各带 ``max_retries`` 次重试）。
     最坏情况是 4 种策略 × 3 次尝试 × SDK 超时 —— 配置写着 60s，
     实际能挂十几分钟。对要回应用户的服务来说，这就是「无界」。
@@ -31,7 +31,7 @@
 ═══ 与 ``ModelTimeoutMiddleware`` 同一个坑：必须按钟判断 ═══
 
 **不能用 ``asyncio.wait_for``**。对话模型基类会**吞掉** ``CancelledError``
-（``model/_base.py:224-230`` 非流式转成空响应、``:255-270`` 流式转成末尾分片），
+（``agentscope/model/_base.py:219-224`` 非流式转成空响应、``:283-288`` 流式转成末尾分片），
 于是 ``wait_for`` 看到的永远是「正常返回」，超时判定一次都不成立 ——
 护栏在纸面上存在、实际是死的。``src/llm/middleware.py``
 的 ``ModelTimeoutMiddleware._await_within_budget`` 已经踩过这个坑，
@@ -46,8 +46,8 @@
 ``dimensions`` / ``supports_multimodal`` **类型属性**，纯代理会丢。重排这条路
 已经核实**只用两个东西**（全项目内 grep 过 ``middleware/_rag.py``）：
 
-    ``_rag.py:484``   ``rerank_model.model``                       —— 打日志
-    ``_rag.py:518``   ``await rerank_model.generate_structured_output(...)``
+    ``agentscope/middleware/_rag.py:484``   ``rerank_model.model``                       —— 打日志
+    ``agentscope/middleware/_rag.py:518``   ``await rerank_model.generate_structured_output(...)``
 
 没有 ``isinstance(..., ChatModelBase)``、没有读 ``credential`` / ``stream`` /
 ``parameters``。所以这里做纯代理（与 ``src/knowledge/guard.py`` 同一种权衡）：
@@ -83,7 +83,7 @@ class ChatCallTimeout(TimeoutError):
     :class:`~src.knowledge.guard.VectorSearchTimeout`、
     :class:`~src.web_embedding.bounded.EmbeddingCallTimeout` 一样继承内置
     ``TimeoutError``：调用方的宽口径 ``except Exception``（框架的重排兜底
-    ``_rag.py:433``、我们自己的降级路径）不必先认识本模块，
+    ``agentscope/middleware/_rag.py:439``、我们自己的降级路径）不必先认识本模块，
     就能把「超时」正确地当成一次可降级的失败。
 
     Attributes:
@@ -164,7 +164,7 @@ class BoundedChatModel:
         """模型名。
 
         ⚠️ **显式**提供而不是靠 ``__getattr__`` 兜：框架的重排日志
-        （``_rag.py:484``）会读它，而一个会在运维面上出现的字段
+        （``agentscope/middleware/_rag.py:484``）会读它，而一个会在运维面上出现的字段
         值得在类上看得见。
         """
         return str(getattr(self._inner, "model", "<未知>"))

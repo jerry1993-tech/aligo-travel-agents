@@ -279,7 +279,7 @@ class TaskCollector:
         ⚠️ 为什么需要它（不是「顺便加的一个 setter」）：同一轮回复里，
         同一件事可能被**分批**上报 —— 最典型的是人工确认：框架对每一个
         被挂起的工具调用**各发一条** ``RequireUserConfirmEvent``
-        （``agent/_agent.py:2574-2577``，``tool_calls=[tool_call]``，
+        （``agentscope/agent/_agent.py:2574-2577``，``tool_calls=[tool_call]``，
         长度恒为 1）。此时正确的处置是**更新**已登记的那一条，
         而不是：
 

@@ -17,7 +17,7 @@
 
 ``Agent.reply(..., structured_schema=...)`` 会把模型转成 JSON Schema 交给大模型，
 框架随后注册一个 ``GenerateStructuredOutput`` 工具强制模型按 schema 输出
-（见侦察结论：``third_party/agentscope/src/agentscope/agent/_agent.py:296,3555``）。
+（注册与换装见 ``agentscope/agent/_agent.py:1126-1132``）。
 因此写这类模型时有三条硬约束：
 
 1. **字段类型必须是 JSON Schema 能表达的基本类型**（str / int / float / bool /
@@ -70,7 +70,7 @@ class _Schema(BaseModel):
     是对是错，取决于「谁在写、写错要付什么代价」。
 
     ⚠️ 这里**刻意不开** ``use_enum_values=True``（框架的事件模型开了，见
-    ``third_party/agentscope/src/agentscope/event/_event.py:70``）。
+    ``agentscope/event/_event.py:72``）。
     开了之后 ``request.stage`` 在运行时是字符串 ``"IDLE"`` 而不是
     ``TripStage.IDLE`` —— 值相等（StrEnum）但 ``isinstance`` 为假，
     于是 ``is_terminal`` 之类的**属性访问会静默退化成 AttributeError**

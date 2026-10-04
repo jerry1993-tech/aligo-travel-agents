@@ -752,7 +752,7 @@ def test_the_message_bus_is_built_with_bounded_redis_timeouts(
     差别只在 Redis「接受连接但不再回包」的那一刻（网络分区、阻塞、
     主从切换）：漏传 ⇒ 每次 ``SET`` / ``XADD`` 无限等待 ⇒
     所有对话卡在 ``acquire_lock`` 的 ``while True`` 上
-    （``_redis_message_bus.py:666-670``，框架没有外层截止时间），
+    （``agentscope/app/message_bus/_redis_message_bus.py:666-670``，框架没有外层截止时间），
     而 ``/healthz`` 仍是 200。
 
     ⚠️ 断言的是**传进去的值**而不是「函数返回的字典好看」：

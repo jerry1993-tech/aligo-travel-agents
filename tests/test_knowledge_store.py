@@ -86,7 +86,7 @@ def test_the_remote_uri_goes_through_the_remote_branch(settings: Settings) -> No
     """``http://milvus:19530`` 必须走**远端服务**分支，不是内嵌 Lite。
 
     ⚠️ 类名叫 ``MilvusLiteStore``，很有误导性。判定走哪条路的是
-    ``_is_local_db_uri``（``rag/_vdb/_milvus_lite.py:538-543``）::
+    ``_is_local_db_uri``（``agentscope/rag/_vdb/_milvus_lite.py:538-543``）::
 
         not uri.startswith(("http://", "https://")) and splitext(uri)[1] == ".db"
 

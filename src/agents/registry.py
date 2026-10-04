@@ -34,7 +34,7 @@ import 时可能会被执行多次（测试里反复 import、或 reload）。�
 
 ═══ ⚠️ ``system_prompt_template`` 只有五个占位符 ═══
 
-已核实（``app/_tool/_agent_create.py:399-405``）：框架对模板做的唯一处理是
+已核实（``agentscope/app/_tool/_agent_create.py:399-405``）：框架对模板做的唯一处理是
 ``str.format(team_name=..., team_description=..., member_name=...,
 member_description=..., leader_name=...)``。
 
@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 #: 框架渲染 ``system_prompt_template`` 时提供的**全部**占位符。
 #:
 #: ⚠️ 这份名单是从框架的 ``.format()`` 调用点抄下来的
-#: （``app/_tool/_agent_create.py:399-405``），不是我们的约定。
+#: （``agentscope/app/_tool/_agent_create.py:399-405``），不是我们的约定。
 #: 少写一个 → 框架渲染时 ``KeyError``，被它吞成一个内容不透明的
 #: ``AgentCreate failed: ...`` 工具结果（症状是「子智能体建不出来」，
 #: 但日志里只有一句笼统的失败）。
@@ -353,7 +353,7 @@ class AgentRegistry:
 
         ⚠️ 返回的是 **list** 而不是 dict。``create_app`` 的公开参数是
         ``list[SubAgentTemplate] | None``；dict 是它**内部**转出来的形态
-        （``app/_app.py:386``）。传 dict 过去，它会去迭代键（一堆字符串），
+        （``agentscope/app/_app.py:386``）。传 dict 过去，它会去迭代键（一堆字符串），
         然后在 ``t.type`` 上崩掉 —— 这个错误发生在装配期，
         但报出来的是 ``AttributeError: 'str' object has no attribute 'type'``，
         与「参数类型传错了」这个真实原因隔得很远。

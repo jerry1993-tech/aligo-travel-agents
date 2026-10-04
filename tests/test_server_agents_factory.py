@@ -245,7 +245,7 @@ def test_the_two_factories_are_async_callables(settings: Settings) -> None:
 
     ⚠️ 这是本文件里最容易搞错的一处，因为它的报错与原因隔得很远：
     ``AgentToolFactory`` 的契约是
-    ``Callable[..., Awaitable[list[ToolBase]]]``（``app/_types.py:33-36``），
+    ``Callable[..., Awaitable[list[ToolBase]]]``（``agentscope/app/_types.py:33-36``），
     框架写的是 ``tools += await factory(...)``。传一个列表过去，
     报出来是 ``TypeError: object list can't be used in 'await' expression``
     —— 而「list」这个词会让人以为是返回值写错了，不是「这个参数本身
@@ -276,7 +276,7 @@ def test_the_two_factories_are_async_callables(settings: Settings) -> None:
 def test_the_subagent_templates_are_a_plain_list(settings: Settings) -> None:
     """★★★ ``custom_subagent_templates`` 必须是**静态列表**，不是工厂。
 
-    ⚠️ 已核实（``app/_app.py:375-386``）：``create_app`` 的公开参数是
+    ⚠️ 已核实（``agentscope/app/_app.py:375-386``）：``create_app`` 的公开参数是
     ``list[SubAgentTemplate] | None``，它在构造期把列表转成 dict 存进
     ``app.state``。传一个**函数**过去，它会去迭代这个函数对象 ——
     报出来是 ``TypeError: 'function' object is not iterable``，
@@ -362,7 +362,7 @@ def test_the_middleware_order_is_lane_tracing_breaker_context(
     ⚠️ 链尾**允许**跟着若干 ``_AgentScopedMiddleware``（回复守卫、可选的 RAG）。
     真正的不变式不是「ContextInjection 在列表最后一格」，而是
     **「它后面没有别的 ``on_system_prompt`` 实现者」** —— 框架用的是
-    ``is_implemented("on_system_prompt")`` 过滤（``agent/_agent.py:236``），
+    ``is_implemented("on_system_prompt")`` 过滤（``agentscope/agent/_agent.py:236``），
     而 :class:`_AgentScopedMiddleware` 只实现 ``on_reply``/``on_reasoning``，
     根本不会进入那条串行链。按位置断言会在每次往后追加中间件时误报。
     """
@@ -421,7 +421,7 @@ def test_every_middleware_is_a_framework_middleware(settings: Settings) -> None:
     """★★ 列表里全是 ``MiddlewareBase`` 子类 —— 否则钩子根本不会被调用。
 
     ⚠️ 已核实：框架在 **Agent 构造期**用类方法身份探测钩子
-    （``middleware/_base.py:64-66`` 的 ``getattr(type(self), hook_name, None)``）。
+    （``agentscope/middleware/_base.py:64-66`` 的 ``getattr(type(self), hook_name, None)``）。
     一个不是 ``MiddlewareBase`` 子类的对象、或者把钩子写成**实例属性**的
     对象，会被**静默忽略** —— 不报错，只是那个中间件完全不起作用。
     """
@@ -597,7 +597,7 @@ def test_the_lane_only_routes_the_main_agent(settings: Settings) -> None:
 
     ⚠️ 这是装配层里最隐蔽的一处。``agent_names=None``（默认值）意味着
     「对所有 agent 生效」，而框架把额外中间件加进**每一个** agent
-    （``app/_service/_chat.py:1075-1092`` 无条件调 ``get_toolkit``）。
+    （``agentscope/app/_service/_chat.py:1075-1092`` 无条件调 ``get_toolkit``）。
 
     后果很具体：快车道的规则表描述的是「用户点了什么按钮」，
     而子智能体被主智能体要求检索政策时，它的输入恰好可能是

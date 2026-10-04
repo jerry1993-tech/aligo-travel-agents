@@ -1644,7 +1644,7 @@ def _user_text_from_inputs(inputs: Any) -> str:
         inputs (`Any`): 框架原样传进来的 ``inputs``。类型是
             ``Msg | list[Msg] | UserConfirmResultEvent | UserInterruptEvent
             | ExternalExecutionResultEvent | None``（见
-            ``agent/_agent.py:899-906`` 的 ``_reply`` 签名）。
+            ``agentscope/agent/_agent.py:900-909`` 的 ``_reply`` 签名）。
 
     Returns:
         `str`: 拼接后的用户文本；取不到时返回空串。
@@ -1830,7 +1830,7 @@ class ReplyGuardMiddleware(MiddlewareBase):
         try:
             async for event in next_handler(**input_kwargs):
                 # ⚠️ 补记 reply_id：**HITL 续答不发 ``ReplyStartEvent``**
-                # （``agent/_agent.py:1105-1118`` 只在「新回复」分支发它；用户确认
+                # （``agentscope/agent/_agent.py:1105-1118`` 只在「新回复」分支发它；用户确认
                 # 订单后的续答走 ``_handle_incoming_event``，只发工具结果事件）。
                 # 不补记的话 ``state.reply_id`` 会一直是空串，之后所有合成事件
                 # 都会被 ``Msg.append_event`` 以「id 不匹配」静默丢弃 —— 而实时
@@ -1922,7 +1922,7 @@ class ReplyGuardMiddleware(MiddlewareBase):
             # 「上一轮发了什么、有没有无依据金额」的记录。
             # ⚠️ 异常时**不**补发本轮缓冲的文本：缓冲里可能是一段没写完的话，
             # 发出去比不发更糟。此时由服务层的失败话术兜底（已核实的框架行为：
-            # 普通异常不发 ``ReplyEndEvent``，``agent/_agent.py:1271-1304`` 只捕获
+            # 普通异常不发 ``ReplyEndEvent``，``agentscope/agent/_agent.py:1271-1304`` 只捕获
             # ``CancelledError``），这是**有意**的取舍，不是遗漏。
             self._report(state)
 
@@ -2122,7 +2122,7 @@ class ReplyGuardMiddleware(MiddlewareBase):
             1. ``state.reply_id`` —— 正常回复由 ``REPLY_START`` 赋值，
                续答由 ``on_reply`` 循环里的补记赋值（任何带 id 的事件）；
             2. ``agent.state.reply_id`` —— 续答时 ``reply_context`` 是**沿用**
-               的（``agent/_agent.py:1109-1114`` 只在新回复分支重建它），所以那里
+               的（``agentscope/agent/_agent.py:1109-1114`` 只在新回复分支重建它），所以那里
                存着原来那条回复的 id。
 
         取不到时返回空串，让事件照发 —— 此时服务端的 ``append_event`` 会跳过
@@ -2264,8 +2264,8 @@ class ReplyGuardMiddleware(MiddlewareBase):
         if self._structured_output_satisfied(agent):
             # ⚠️ 结构化输出已经满足时**不许吞**：框架在「schema 已满足」的
             # ``Exit`` 分支**不调用模型**就能再次发出 ``ReplyEndEvent``
-            # （``agent/_agent.py:3554-3578``），连吞两次且中间没有进展就会撞上
-            # ``made_progress`` 守卫抛 ``RuntimeError``（``agent/_agent.py:1165-1173``）。
+            # （``agentscope/agent/_agent.py:3554-3578``），连吞两次且中间没有进展就会撞上
+            # ``made_progress`` 守卫抛 ``RuntimeError``（``agentscope/agent/_agent.py:1165-1173``）。
             # 而且重说也改变不了结局 —— 结构化结果已经定了。
             # 当前装配下 ``main_plan`` 不带 ``structured_schema``，所以这条
             # 分支**不可达**；写在这里是为了将来给它加上结构化输出时不会

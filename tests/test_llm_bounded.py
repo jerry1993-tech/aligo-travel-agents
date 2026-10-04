@@ -10,7 +10,7 @@
 
 它在**回复链路里**，却没有任何一层给它设截止时间：``ModelTimeoutMiddleware``
 只管 ``on_model_call``（agent 自己的模型调用），而框架给重排的
-``except Exception``（``third_party/agentscope/src/agentscope/middleware/_rag.py:433``）
+``except Exception``（``agentscope/middleware/_rag.py:439``）
 只在**抛异常**时才回退到向量序 —— 卡住不返回的调用永远不抛异常。
 换句话说，一个挂住的重排会把用户的回复一起拖住，而配置看起来完全正常。
 
@@ -21,7 +21,7 @@
 
     ``asyncio.wait_for`` 靠取消来中断，再把「取消有没有传播出来」当成超时判据。
     框架的对话模型基类**刻意**把 ``CancelledError`` 转成一个优雅的
-    「已打断」响应（``third_party/agentscope/src/agentscope/model/_base.py:224``），
+    「已打断」响应（``agentscope/model/_base.py:219-224``），
     于是 ``wait_for`` 看到的永远是「正常返回」，超时一次都不触发。
     ``src/llm/middleware.py`` 的 ``ModelTimeoutMiddleware`` 踩过同一个坑，
     本模块用同一套「按钟判断」的写法绕开它。
@@ -68,7 +68,7 @@ class SwallowingModel(MockChatModel):
 
     ``generate_structured_output`` 在收到 ``CancelledError`` 之后不往外抛，
     而是稍等一下再**正常返回**。这正是
-    ``third_party/agentscope/src/agentscope/model/_base.py:224``
+    ``agentscope/model/_base.py:219-224``
     对 ``CancelledError`` 的处理方式（转成一次「已打断」的响应），
     也是 ``asyncio.wait_for`` 在本项目里失效的原因。
 
@@ -224,7 +224,7 @@ def test_inner_errors_are_not_rewritten_into_timeouts() -> None:
 def test_model_name_is_readable_through_the_wrapper() -> None:
     """``.model`` 在包装层上直接可读。
 
-    框架的重排日志（``third_party/agentscope/src/agentscope/middleware/_rag.py:484``）
+    框架的重排日志（``agentscope/middleware/_rag.py:484``）
     会读它；读不到就会以 ``AttributeError`` 的形式在检索路径上炸出来。
     用例同时钉住 :class:`ChatCallTimeout` 的 ``model`` 字段 ——
     它是排障时唯一能回答「哪个模型卡住了」的字段。
@@ -301,7 +301,7 @@ def test_rerank_model_is_none_when_disabled() -> None:
 
     ⚠️ 返回 ``None`` 而不是「一个永不生效的模型」：``RAGMiddleware``
     只在 ``rerank_model is None`` 时才不扩大召回（
-    ``third_party/agentscope/src/agentscope/middleware/_rag.py:405``），
+    ``agentscope/middleware/_rag.py:405``），
     塞一个假模型进去会让每次检索多做一轮无用的召回。
     """
     settings = _settings(**{"ALIGO__RERANK__ENABLED": "false"})

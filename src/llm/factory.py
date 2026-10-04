@@ -307,7 +307,7 @@ def build_chat_model(
     assert isinstance(credential, credential_cls)  # 类型收窄，便于静态检查
 
     # 两个模型类的 Parameters 都至少含 max_tokens / temperature
-    # （已核对 agentscope 2.0.10dev 的两处定义），因此可以走同一段构造。
+    # （已核对 agentscope 2.0.9 的两处定义），因此可以走同一段构造。
     # DashScope 档另外还有 thinking_enable / thinking_budget / top_k / voice ——
     # 那些**刻意不在这里设**：本函数是两条链路（app 与离线脚本）的公共装配点，
     # 在这里打开思考会同时改变评测与线上的行为。P3 需要时按会话在中间件里注入。
@@ -361,19 +361,19 @@ def build_rerank_model(
     """按配置构造**重排**用的对话模型（关闭时返回 ``None``）。
 
     ⚠️ 先把一件事说清楚：本项目的「重排」是 **LLM-as-reranker**。
-    框架（agentscope 2.0.10dev）**没有**重排模型类 —— ``RAGMiddleware``
+    框架（agentscope 2.0.9）**没有**重排模型类 —— ``RAGMiddleware``
     的 ``rerank_model`` 参数收的是一个 ``ChatModelBase``，它按提示词
-    （``middleware/_rag.py:85-94``）给候选段落打分排序。
+    （``agentscope/middleware/_rag.py:85-94``）给候选段落打分排序。
     所以 ``settings.rerank.model`` 填的必须是**对话模型名**，
     写 ``qwen3-rerank`` / ``gte-rerank`` 这类专用重排模型名在本框架里
-    必然调用失败（而失败会被 ``_rag.py:433`` 静默吞掉、退回向量序 ——
+    必然调用失败（而失败会被 ``agentscope/middleware/_rag.py:439`` 静默吞掉、退回向量序 ——
     症状是「开了重排但排序没变」，非常难发现）。
 
     ⚠️ 返回值**一律**套了 :class:`~src.llm.bounded.BoundedChatModel`。
     理由与 ``src/web_embedding/bounded.py`` 同源但更严重：重排调用发生在
     回复链路内（``RAGMiddleware.on_reasoning``），却没有 ``on_model_call``
     钩子覆盖它，而它的内部是一条「策略阶梯 + 重试」
-    （``model/_base.py:511-534``）。没有这一层，一次卡住的重排会把用户的
+    （``agentscope/model/_base.py:511-534``）。没有这一层，一次卡住的重排会把用户的
     回复一起拖住，而框架那边的 ``except Exception`` 只在**抛异常**时才回退
     —— 卡住不返回的调用永远不抛异常。
 
@@ -386,7 +386,7 @@ def build_rerank_model(
             装配链在测试里不会偷偷去建一个真实模型。
             ⚠️ 复用实例是安全的：结构化输出走
             ``_call_api_with_structured_output``，基类对**流式**
-            响应自己做了累积（``model/_base.py:668-681``），
+            响应自己做了累积（``agentscope/model/_base.py:668-681``），
             所以主模型 ``stream=True`` 不影响重排拿结果。
 
     Returns:

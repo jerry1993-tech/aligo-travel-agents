@@ -6,7 +6,7 @@
 ``src/knowledge/guard.py`` 给向量库的读操作箍上了超时与熔断，但一次检索
 在到达向量库**之前**还有一步：
 
-    框架 ``KnowledgeBase.search``（``rag/_knowledge.py:238``）::
+    框架 ``KnowledgeBase.search``（``agentscope/rag/_knowledge.py:238``）::
 
         await self.ensure_collection()                       # ← 已被 guard 覆盖
         response = await self._embedding_model(queries)      # ← 本模块覆盖的是这里
@@ -19,10 +19,10 @@
 
 这不是假想的故障。两条真实路径都是**无界**的：
 
-  · ``dashscope`` 档（``embedding/_dashscope/_model.py:371``）走
+  · ``dashscope`` 档（``agentscope/embedding/_dashscope/_model.py:371``）走
     ``asyncio.to_thread(dashscope.embeddings.TextEmbedding.call, ...)`` ——
     一个同步 HTTP 调用，超时值由 dashscope SDK 自己决定，我们控制不到；
-    且框架基类还会重试（``_embedding_base.py:330``：
+    且框架基类还会重试（``agentscope/embedding/_embedding_base.py:330``：
     ``max_retries=3`` ⇒ 最多 4 轮 × 每轮 ``retry_delay=1.0s``）。
   · ``local`` 档（``src/web_embedding/local.py``）走 ``asyncio.to_thread``
     把 ONNX 推理丢进线程池 —— 推理本身有界，但线程池**排队**没有：
@@ -32,10 +32,10 @@
 
 ``src/llm/middleware.py`` 里的 ``ModelTimeoutMiddleware`` 被迫用「按钟判断」
 （``asyncio.wait``）而不是 ``wait_for``，因为框架的**对话**模型基类会**吞掉**
-``CancelledError``（``model/_base.py:224-230`` / ``:255-270``），
+``CancelledError``（``agentscope/model/_base.py:219-224`` / ``:283-288``），
 于是 ``wait_for`` 的超时永远触发不了。
 
-向量模型**没有**这个毛病，而且是可核验的：``_embedding_base.py:330`` 的重试
+向量模型**没有**这个毛病，而且是可核验的：``agentscope/embedding/_embedding_base.py:330`` 的重试
 只捕获 ``Exception``（``except Exception as e``），而 ``CancelledError``
 自 3.8 起继承自 ``BaseException`` —— 它会穿过重试循环，让 ``wait_for``
 正常判定超时。**所以这里刻意用更简单的 ``wait_for``**：
@@ -87,8 +87,8 @@ class BoundedEmbeddingModel(EmbeddingModelBase):
 
     ⚠️ 刻意**继承** ``EmbeddingModelBase`` 而不是做纯代理：框架对向量模型的
     使用不只是「调一下」——``KnowledgeBase`` 读它的
-    ``dimensions``（``rag/_knowledge.py:182``，建集合时用）与
-    ``supports_multimodal``（``:230``，决定要不要丢掉 ``DataBlock``），
+    ``dimensions``（``agentscope/rag/_knowledge.py:182``，建集合时用）与
+    ``supports_multimodal``（``:232-233``，决定要不要丢掉 ``DataBlock``），
     这两个属性必须在包装层上**真的存在**。
     ``src/knowledge/guard.py`` 那边框架只做鸭子类型使用、可以纯代理；
     这里不行，所以老老实实继承。
@@ -148,7 +148,7 @@ class BoundedEmbeddingModel(EmbeddingModelBase):
             retry_delay=inner.retry_delay,
         )
         # ⚠️ ``supports_multimodal`` 是**实例**属性（子类按模型名在
-        # ``__init__`` 里决定，见 ``_dashscope/_model.py:148``），
+        # ``__init__`` 里决定，见 ``agentscope/embedding/_dashscope/_model.py:160``），
         # 基类的类默认值恒为 False —— 不复制的话，多模态档经过包装
         # 会被当成纯文本模型，``KnowledgeBase.search`` 会**静默丢掉**
         # 所有 ``DataBlock`` 输入，表现为「图片检索永远没有结果」。

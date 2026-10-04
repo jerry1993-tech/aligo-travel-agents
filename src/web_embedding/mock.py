@@ -83,7 +83,7 @@ class MockEmbeddingModel(EmbeddingModelBase):
 
     ⚠️ 继承框架的 :class:`~agentscope.embedding.EmbeddingModelBase`，
     只实现 ``_call_api`` 一个方法。批切分、并发、重试、``TextBlock`` 解包
-    全部由基类的 ``__call__`` 完成（``_embedding_base.py:197-260``）——
+    全部由基类的 ``__call__`` 完成（``agentscope/embedding/_embedding_base.py:197-260``）——
     自己再写一遍就等于给自己留一个与框架行为不一致的分支。
 
     ⚠️ 构造参数里的 ``credential`` 是基类签名要求的，本类**不使用**。
@@ -98,7 +98,7 @@ class MockEmbeddingModel(EmbeddingModelBase):
         保留这个空的内嵌类是为了**签名兼容**：框架的
         ``app/_service/_embedding.py::build_embedding_model`` 在
         ``config.parameters`` 非空时会调用 ``embedding_cls.Parameters(**...)``
-        （``_embedding.py:77-81``）。没有它，任何带参数的
+        （``agentscope/app/_service/_embedding.py:77-81``）。没有它，任何带参数的
         ``EmbeddingModelConfig`` 都会以 ``AttributeError`` 失败 ——
         而失败点离「少写三行类定义」很远。
         """
@@ -122,7 +122,7 @@ class MockEmbeddingModel(EmbeddingModelBase):
             parameters (`object | None`): 框架按配置传入的参数对象。本实现
                 **接受但不使用**（Mock 没有可调参数）。⚠️ 这个形参本身是必需的：
                 框架的 ``build_embedding_model`` **恒定**传
-                ``parameters=``（``_service/_embedding.py:83-88``），少一个
+                ``parameters=``（``agentscope/app/_service/_embedding.py:83-88``），少一个
                 形参就是 ``TypeError`` —— 而走这条路径的只有知识库链路，
                 症状是「知识库建好了、检索报 500」。
             context_size (`int | None`): 框架在模型卡片里查到后才传（本项目
@@ -151,7 +151,7 @@ class MockEmbeddingModel(EmbeddingModelBase):
         """把一批文本映射成向量。
 
         ⚠️ 签名必须与基类的抽象方法一致
-        （``_embedding_base.py:363``：``_call_api(self, inputs: list[Any], **kwargs)``）。
+        （``agentscope/embedding/_embedding_base.py:364-368``：``_call_api(self, inputs: list[Any], **kwargs)``）。
         基类保证传进来的 ``inputs`` **已经是** ``list[str]``
         （``TextBlock`` 在 ``__call__`` 里就被解包了），所以这里不必再做类型分支。
 

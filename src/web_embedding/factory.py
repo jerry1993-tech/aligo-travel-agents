@@ -68,7 +68,7 @@ def _build_dashscope(settings: Settings) -> EmbeddingModelBase:
     return DashScopeEmbeddingModel(
         credential=DashScopeCredential(api_key=api_key),
         model=settings.embedding.model,
-        # ⚠️ dimensions 是**必填**的（``_embedding_base.py:158``：
+        # ⚠️ dimensions 是**必填**的（``agentscope/embedding/_embedding_base.py:158``：
         # 为 None 且 legacy parameters 里也没有时抛 ValueError）。
         # 传配置值而不是让框架去猜：这三档必须输出同一个维度，
         # 而「同一个维度」这件事只有我们自己的配置知道。

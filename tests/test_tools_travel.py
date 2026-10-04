@@ -460,13 +460,13 @@ def test_policy_survives_a_broken_repository() -> None:
 def test_all_travel_tools_are_read_only() -> None:
     """★★ **本文件最要紧的一条**：三个查询工具都必须是 ``is_read_only=True``。
 
-    已核实（``tool/_adapters.py:116-135``）：``FunctionTool`` 的 ``permission``
+    已核实（``agentscope/tool/_adapters.py:116-135``）：``FunctionTool`` 的 ``permission``
     默认是 ``None``，而 ``None`` 被解释成 ``PermissionDecision(behavior=ASK)``
     —— 于是**每一个**工具调用都会弹一次用户确认。
 
     对查询类工具那是灾难性的：用户问「查下我的订单」，系统弹窗问
     「是否允许查询订单？」。而 ``is_read_only=True`` 会命中权限引擎的
-    只读快速通道（``permission/_engine.py:308-317``），在工具自身的权限
+    只读快速通道（``agentscope/permission/_engine.py:659-692``），在工具自身的权限
     判定**之前**直接放行。
 
     ⚠️ 这条断言反过来也重要：它让「有人为了让演示更顺畅而把写工具也标成

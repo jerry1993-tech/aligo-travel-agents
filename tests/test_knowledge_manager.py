@@ -162,7 +162,7 @@ class FakeVectorStore:
         """按**扁平 key == value** 过滤 —— 与 Milvus 后端的语义一致。
 
         ⚠️ 只支持相等，不支持 ``$gt`` / ``$in`` / ``$or`` ——
-        ``_milvus_lite.py:504-515`` 就是这么实现的。替身跟着一起窄，
+        ``agentscope/rag/_vdb/_milvus_lite.py:504-515`` 就是这么实现的。替身跟着一起窄，
         是为了让「用了一个 Milvus 不支持的 filter」在单测里就暴露，
         而不是等到连上真库才报错。
         """
@@ -284,7 +284,7 @@ async def test_deleting_one_kb_never_drops_the_shared_collection(
     ⚠️ 这是整个 P4 里最重要的一条断言，因为它挡的是一个**不可逆的数据丢失**。
 
     框架的 ``CollectionPerKbManager.delete_knowledge_base`` 走的是
-    ``has_collection`` → ``delete_collection``（``_collection_per_kb.py:139-144``）。
+    ``has_collection`` → ``delete_collection``（``agentscope/app/rag/knowledge_base_manager/_collection_per_kb.py:139-144``）。
     在 per-KB 策略下那是对的：那个集合只属于这一个 KB。
     但在本项目的单集合策略下，``record.data.collection_name``
     对**每一个** KB 都是 ``settings.milvus.collection`` ——

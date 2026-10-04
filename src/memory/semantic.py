@@ -94,7 +94,7 @@ class MemoryKind:
 
     ⚠️ 用 ``str`` 常量而不是 ``Enum``：它的值直接写进 Milvus 的
     metadata JSON，再经 ``metadata_filter`` 的**扁平等值**过滤回来
-    （见 ``_milvus_lite.py:504-515``，只支持 ``key == value``）。
+    （见 ``agentscope/rag/_vdb/_milvus_lite.py:504-515``，只支持 ``key == value``）。
     ``Enum`` 会在序列化那一层多出一次转换，而 Milvus 的 filter
     是拿字符串拼表达式的 —— 转换漏一次就变成「永远查不到」。
     """
@@ -124,7 +124,7 @@ def note_id(user_id: str, text: str) -> str:
     ⚠️ 确定性还让「同一句话在不同进程/不同副本上算出同一个 id」
     成立 —— 这是能靠 ``upsert`` 语义去重的前提
     （``MilvusLiteStore.insert`` 用 ``sha256(document_id\\0chunk_index)``
-    作为主键，见 ``_milvus_lite.py:239-256``）。
+    作为主键，见 ``agentscope/rag/_vdb/_milvus_lite.py:239-257``）。
 
     Args:
         user_id (`str`): 员工 id。
@@ -298,7 +298,7 @@ class SemanticMemory:
         #     而实测漏掉的恰恰是这一步。
         #
         # 代价说清楚：框架的 ``create_collection`` 在集合已存在时是
-        # **no-op**（``rag/_vdb/_milvus_lite.py:129-131``），成本是里面
+        # **no-op**（``agentscope/rag/_vdb/_milvus_lite.py:129-131``），成本是里面
         # 那次 ``has_collection`` RPC（毫秒级）；而本方法紧接着必然要发
         # 一次 embedding 请求（下一行的 ``self._embedding``），网络往返
         # 比它大一个数量级。收益是「集合被删了 / 从没建过」都能自愈。
@@ -328,7 +328,7 @@ class SemanticMemory:
 
         # ⚠️ 先删后写。``delete`` 按 ``document_id`` 过滤，
         # 匹配不到任何记录时是一次 no-op（不抛）—— 见
-        # ``_milvus_lite.py:257-266``，它走的是 ``client.delete(filter=...)``。
+        # ``agentscope/rag/_vdb/_milvus_lite.py:259-269``，它走的是 ``client.delete(filter=...)``。
         await self._store.delete(self.collection, identifier)
 
         vectors = await self._embedding([cleaned])
@@ -485,7 +485,7 @@ class SemanticMemory:
 
         ⚠️ 只有**扁平的两个字符串键**。``metadata_filter`` 走到
         Milvus 那边是 ``metadata["k"] == "v"`` 拼出来的表达式
-        （``_milvus_lite.py:504-515``），只支持等值 —— 塞进去一个
+        （``agentscope/rag/_vdb/_milvus_lite.py:504-515``），只支持等值 —— 塞进去一个
         列表或嵌套 dict 不会报错，但那个键永远匹配不上，
         表现为「隔离失效」（filter 拼出来的表达式在 Milvus 侧语法错误，
         搜索直接失败）或者「永远查不到」。
@@ -504,7 +504,7 @@ def _text_of(chunk: Chunk) -> str:
     """从 chunk 里取出文本。
 
     ⚠️ ``Chunk.content`` 是 ``TextBlock | DataBlock``，**不是** ``str``
-    （``rag/_document.py:80-82``）。直接 ``str(chunk.content)`` 会得到
+    （``agentscope/rag/_document.py:80-82``）。直接 ``str(chunk.content)`` 会得到
     ``"text='...' type='text'"`` 这种 pydantic repr —— 它看起来像内容，
     于是这个错误能一路活到 prompt 里，只是把一堆引号和字段名喂给了模型。
 

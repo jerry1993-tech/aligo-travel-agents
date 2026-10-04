@@ -59,7 +59,7 @@ def build_intent_tool(recognizer: IntentRecognizer) -> ToolBase:
     这不是「因为它不写数据库所以顺手标上」，而是权限引擎的硬性要求：
     每次调用都弹一次人工确认的话，用户点「规划行程」要先确认一次
     「正在识别你的意图」，产品没法用。只读工具走引擎的快速通道
-    （``permission/_engine.py:659-687``，在**所有** ``PermissionMode`` 下
+    （``agentscope/permission/_engine.py:659-687``，在**所有** ``PermissionMode`` 下
     自动放行），详见 ``src/tools/travel.py`` 的说明。
 
     Args:

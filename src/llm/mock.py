@@ -24,7 +24,7 @@
 为什么只实现 ``_call_api``
 ------------------------------------------------------------------------------
     框架的 ``ChatModelBase.__call__`` 已经把「重试 + 流式累积」做完了
-    （``model/_base.py:182-290``）：
+    （``agentscope/model/_base.py:182-290``）：
         · 它按 ``max_retries`` 重试 **可重试异常**；
         · 它用一个 ``_StreamAccumulator`` 把 ``is_last=False`` 的分片
           按 block id 归并成完整响应，并在需要时补一个收尾响应。
@@ -316,7 +316,7 @@ class MockChatFormatter(FormatterBase):
     ⚠️ 它看起来是纯样板，实则是**必需的**：框架的
     ``Agent._handle_incoming_messages`` 会读
     ``self.model.formatter.supported_input_media_types``
-    （``agent/_agent.py:2062``）来决定要不要把多模态内容块转成文本提示。
+    （``agentscope/agent/_agent.py:2062``）来决定要不要把多模态内容块转成文本提示。
 
     ``formatter`` **不是** ``ChatModelBase`` 的基类属性，而是由每个具体模型
     在 ``__init__`` 里自己赋的（``model/_openai_chat/_model.py`` 等
@@ -373,7 +373,7 @@ class MockCredential(CredentialBase):
     看起来多余（Mock 不需要任何密钥），但它承担一个**架构职责**：
     ``agentscope.app`` 的聊天链路是从 storage 里的 credential 记录
     ``CredentialFactory.from_dict(...)`` 反查模型类的
-    （``app/_service/_model.py:12-63``）。注册一个 credential 类型，
+    （``agentscope/app/_service/_model.py:12-63``）。注册一个 credential 类型，
     就能让「app 链路」与「我们自己的 build_chat_model」选到同一个模型实现，
     从而在零密钥环境下整个服务天然可用，不需要给 app 链路开特例分支。
     """
@@ -444,7 +444,7 @@ class MockChatModel(ChatModelBase):
         """Mock 模型没有可调参数。
 
         保留这个空的内嵌类是为了**签名兼容**：框架与我们的装配函数都按
-        ``parameters: BaseModel`` 传入（``model/_base.py:68``），
+        ``parameters: BaseModel`` 传入（``agentscope/model/_base.py:66``），
         真实模型传的是各自的 ``Parameters`` 实例。若这里直接沿用基类而不显式
         继承，将来框架给基类加字段时，Mock 会悄悄继承到一堆对它有语义的配置项。
         """
@@ -454,7 +454,7 @@ class MockChatModel(ChatModelBase):
         """列出本模型可选的模型卡片。
 
         ⚠️ **必须**覆写基类的实现（而不是留空）。基类是按「子类所在目录下的
-        ``_models/*.yaml``」来找卡片的（``model/_base.py:150-160``），
+        ``_models/*.yaml``」来找卡片的（``agentscope/model/_base.py:150-160``），
         ``src/llm/`` 下没有这个目录 ⇒ 返回空列表 ⇒ 前端「可用模型」为空 ⇒
         发送按钮永久禁用。完整因果链见 :func:`mock_model_card`。
 
@@ -609,7 +609,7 @@ class MockChatModel(ChatModelBase):
 
             顺序上**必须先分片、后收尾**：框架的 ``__call__`` 在遇到
             ``is_last=True`` 时会停止累积并把它原样交给消费方
-            （``model/_base.py:280-282``）。若先给收尾响应，后续分片会被丢弃。
+            （``agentscope/model/_base.py:280-282``）。若先给收尾响应，后续分片会被丢弃。
             """
             # 思考块与工具调用块都是「整体」语义，不切片：
             # 工具调用的 input 是 JSON 字符串，切开会让下游看到半截 JSON。

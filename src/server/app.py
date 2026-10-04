@@ -14,13 +14,13 @@ ASGI 应用对象。改这个约定等于改部署方式，必须同步改那两
 核心决策一：**复用 create_app 的返回值作根应用，绝不 mount**
 ==============================================================================
     ``create_app`` 把 lifespan 挂在它自己创建的 FastAPI 实例上
-    （``app/_app.py:292``），而 **Starlette 的 ``mount()`` 不会触发子应用的
+    （``agentscope/app/_app.py:292``），而 **Starlette 的 ``mount()`` 不会触发子应用的
     lifespan**（只处理 http/websocket，见 ``starlette/routing.py`` 的
     ``Router.app``）。AgentScope 的作者本人也在健康检查路由的 docstring 里
     把这一点写成了警告（``app/_router/_health.py``）。
 
     若按官方 docstring 的 ``root.mount("/agentscope", agentscope_app)`` 写
-    （``app/_app.py:121-129``），后果是：
+    （``agentscope/app/_app.py:121-129``），后果是：
         · ``chat_service`` / ``session_service`` / ``scheduler_manager`` 等
           **全部在 lifespan 里才写入** ``app.state``（``app/_lifespan.py``）；
         · lifespan 没跑 ⇒ 这些属性不存在 ⇒ 依赖注入取 ``app.state.chat_service``
@@ -176,7 +176,7 @@ def build_storage(settings: Settings) -> Any:
     这是「零密钥可启动」得以成立的原因之一，也是本模块能在 import 期安全调用它的前提。
 
     ``auto_migrate`` 恒为 ``False``（不对外暴露成配置项）：框架源码明确警告
-    多副本并发迁移不安全（``app/storage/_sql/_storage.py:137-142``）。
+    多副本并发迁移不安全（``agentscope/app/storage/_sql/_storage.py:137-142``）。
     框架侧靠 ``create_tables`` 建表，业务 schema 的迁移由 alembic 负责。
 
     Args:
@@ -204,8 +204,8 @@ def _redis_connection_params(settings: Settings) -> dict[str, Any]:
     ⚠️ **超时参数必须在这里补上，否则整条会话链路是无界的。**
 
     框架那两个类只是把 ``**kwargs`` 原样转交给
-    ``redis.asyncio.ConnectionPool``（``_redis_message_bus.py:142-149``、
-    ``_redis_storage.py:233-239``），而 redis-py 的 ``socket_timeout``
+    ``redis.asyncio.ConnectionPool``（``agentscope/app/message_bus/_redis_message_bus.py:142-149``、
+    ``agentscope/app/storage/_redis_storage.py:233-239``），而 redis-py 的 ``socket_timeout``
     **默认是 None**（= 永不到期）。也就是说：只传 host/port/db/password 的话，
     一个「接受连接但不再回包」的 Redis（网络分区、阻塞、主从切换）
     会让每一次 ``SET`` / ``XADD`` / ``PUBLISH`` 无限等待。
@@ -213,15 +213,15 @@ def _redis_connection_params(settings: Settings) -> dict[str, Any]:
     这不是理论风险，后果在源码里可以直接读出来：
 
       · ``RedisMessageBus.acquire_lock`` 是 ``while True: await self._client.set(...)``
-        （``_redis_message_bus.py:666-670``），框架没有任何外层截止时间；
-      · 而框架的每轮对话都在这把锁里面跑（``app/_service/_chat.py:797``）
+        （``agentscope/app/message_bus/_redis_message_bus.py:666-670``），框架没有任何外层截止时间；
+      · 而框架的每轮对话都在这把锁里面跑（``agentscope/app/_service/_chat.py:797``）
 
     ⇒ Redis 卡住 = 所有对话永远拿不到锁 = SSE 一条事件都不再推送，
     而 ``/healthz`` 依然是 200（进程活着）。这正是 2026-10-03 Milvus
     那次「服务假死」的同一种形态，只是换了一个依赖。
 
     ⚠️ ``socket_timeout`` 会不会误伤长连接订阅？不会 —— 框架的 pub/sub
-    读循环显式接住了读超时并 ``continue``（``_redis_message_bus.py:592-604``，
+    读循环显式接住了读超时并 ``continue``（``agentscope/app/message_bus/_redis_message_bus.py:600-605``，
     它甚至就是为「连接设了 socket_timeout」这一情形写的）。
     ``socket_connect_timeout`` 单独设置，是为了让「连不上」与「连上了不回话」
     都快速失败。
@@ -892,7 +892,7 @@ def create_root_app(
 
     # ---- 替换 lifespan ------------------------------------------------------
     # create_app 不接受自定义 lifespan 参数，它把框架的 lifespan 写死在
-    # FastAPI(...) 构造里（app/_app.py:292）。因此这里直接替换路由器上的
+    # FastAPI(...) 构造里（agentscope/app/_app.py:292）。因此这里直接替换路由器上的
     # ⚠️ 这一行让上面那个 ``_access_policy_provider`` 从此刻起能取到策略。
     # 必须在 ``create_app`` **之后**：策略对象是**框架**在 create_app 内部
     # 写进 ``app.state`` 的（我们传进去的只是「用哪一条规则」）。写在之前

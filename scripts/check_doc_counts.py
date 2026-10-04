@@ -74,15 +74,30 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: docker-compose.yaml 的路径（本脚本的多数实测值来自它）。
 COMPOSE_PATH = REPO_ROOT / "docker-compose.yaml"
 
-#: vendored 的 AgentScope 源码根。
-AGENTSCOPE_SRC = REPO_ROOT / "third_party" / "agentscope" / "src" / "agentscope"
+#: 已安装的 AgentScope 包根（框架自 2026-10-04 起由 pip 包提供，不再 vendored）。
+def _agentscope_src() -> Path | None:
+    """用 ``agentscope.__file__`` 定位包根；未安装时为 ``None``。
+
+    刻意不硬编码 ``site-packages`` 路径 —— 换 Python 版本 / 虚拟环境后
+    硬编码路径会静默指向不存在的文件，这里则解析到"当前解释器真正会 import 的那份"。
+    """
+    try:
+        import agentscope
+    except ImportError:
+        return None
+    return Path(agentscope.__file__).resolve().parent
+
+
+AGENTSCOPE_SRC = _agentscope_src()
 
 #: 全仓库扫描时跳过的目录。
 #:
 #: ⚠️ ``docs`` 里的 ``博客原文-*.md`` 是**抓取来的第三方文本**，里面的数字
 #:    （"50% 提升到 90%"之类）是阿里自己的口径，不是本项目的断言，
 #:    更不由本项目维护。把它们卷进来只会产生一堆无法修复的报错。
-#: ``third_party`` 同理：上游的注释不是我们写的。
+#: ``third_party``：仓库历史上 vendored 过框架源码（2026-10-04 起改为 pip 包安装，
+#:    该目录已移除）；保留这条是为了将来若再引入任何本地源码树时，
+#:    把上游文字里的数字挡在扫描集之外。
 SKIP_DIRS = frozenset(
     {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
      ".venv", "venv", "node_modules", "dist", "build", ".idea", ".vscode",
@@ -131,7 +146,7 @@ class Claim:
         name (`str`): 人类可读的名字。
         unit (`str`): 单位（「个」「种」），只用于打印。
         measure (`Callable[[], int | None]`): 实测函数。
-            返回 ``None`` 表示**本机测不了**（例如 vendored 源码不在），
+            返回 ``None`` 表示**本机测不了**（例如 agentscope 未安装），
             此时整条断言被记为「跳过」并打印原因 —— 而不是失败。
             刻意不用 0 表示"测不了"：0 是一个合法的计数结果，
             把它与"读不到"混为一谈会制造假失败。
@@ -306,18 +321,19 @@ def _measure_registry_prefixed_distinct_images() -> int | None:
 
 
 # ==============================================================================
-# 实测：vendored AgentScope
+# 实测：已安装的 AgentScope
 # ==============================================================================
 def _read_agentscope(relative: str) -> str | None:
-    """读 vendored agentscope 里的一个文件。
+    """读已安装 ``agentscope`` 包里的一个文件。
 
     Args:
-        relative (`str`): 相对 ``third_party/agentscope/src/agentscope`` 的路径。
+        relative (`str`): 相对 ``agentscope`` 包根（``site-packages/agentscope``）的路径。
 
     Returns:
-        `str | None`: 文件内容；不存在时为 ``None``
-            （例如只 clone 了主仓、没有 ``third_party`` 子模块时）。
+        `str | None`: 文件内容；未安装或文件不存在时为 ``None``。
     """
+    if AGENTSCOPE_SRC is None:
+        return None
     try:
         return (AGENTSCOPE_SRC / relative).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -328,7 +344,7 @@ def _measure_event_types() -> int | None:
     """``agentscope.event.EventType`` 的枚举成员数（实测 = 28）。
 
     ⚠️ 这个数**必须实测而不是照抄**：本项目前期据博客文档写过「27 种」，
-    而本地安装的 2.0.10dev 里是 28 种。差的那个是 ``CUSTOM`` ——
+    而本地安装的 agentscope==2.0.9 里是 28 种。差的那个是 ``CUSTOM`` ——
     一个"兜底事件类型"，看博客时代的文档根本不会知道它存在。
     前端按 27 种写 switch 时，第 28 种会**静默走进 default 分支**。
 
@@ -783,7 +799,7 @@ def check_claims() -> Outcome:
     for claim in CLAIMS:
         measured = claim.measure()
         if measured is None:
-            outcome.skipped.append(f"{claim.name}：本机读不到实测来源（vendored 源码或 compose 缺失）")
+            outcome.skipped.append(f"{claim.name}：本机读不到实测来源（agentscope 未安装或 compose 缺失）")
             continue
 
         # ⚠️ 逐个 Site 检查，**不是**把所有 Site 合起来看有没有匹配。

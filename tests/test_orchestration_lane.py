@@ -780,7 +780,7 @@ def test_fast_lane_also_narrows_the_meta_tool() -> None:
 
     ⚠️ 它与编排工具**不是**一回事，注入条件也不同：编排工具是「有团队/
     规划能力就有」，元工具的条件是「**工具组多于一个**」
-    （``tool/_toolkit.py:502-510``，会话配了模型时会出现 ``schedule_tools``
+    （``agentscope/tool/_toolkit.py:502-510``，会话配了模型时会出现 ``schedule_tools``
     组 ⇒ 线上确实在）。
 
     留着它的后果与收窄的初衷相反：模型可以「关掉一组工具、再开另一组、
@@ -1045,7 +1045,7 @@ def test_orchestration_tool_names_match_the_framework() -> None:
 
     两组名字来自框架里两个不同的地方，都要覆盖：
 
-    - 团队工具在 ``agentscope.app._tool``（``_service/_toolkit.py:184-198``
+    - 团队工具在 ``agentscope.app._tool``（``agentscope/app/_service/_toolkit.py:184-198``
       按会话角色挂载）；
     - 规划工具在 ``agentscope.tool._task``（同文件 ``:143`` **无条件**挂载）。
     """
@@ -1096,7 +1096,7 @@ def test_tool_management_names_match_the_framework() -> None:
 
     ⚠️ 名字来源与编排工具完全不同，所以没法并进上一条用例：编排工具是
     在 ``app/_tool`` / ``tool/_task`` 里**导出**的类，而元工具是
-    ``Toolkit`` 在装配期**注入**的（``tool/_toolkit.py:156``），
+    ``Toolkit`` 在装配期**注入**的（``agentscope/tool/_toolkit.py:156``），
     没有任何模块把它写进 ``__all__``。只能问一个造出来的 ``Toolkit``。
 
     ⚠️ 顺带把「注入条件」也钉住 —— 这正是它与编排工具不该混成一份名单的
@@ -1143,7 +1143,7 @@ def test_process_control_names_match_the_framework() -> None:
     ⚠️ 名字来源是第三处，所以不能并进上面两条：编排工具在模块 ``__all__``
     里，元工具由 ``Toolkit`` 装配期注入，而 ``ToolStop`` 是
     ``BackgroundTaskManager.list_tools(session_id)`` 每次现造的
-    （``app/_manager/_background_task_manager.py:362-374``）。
+    （``agentscope/app/_manager/_background_task_manager.py:362-374``）。
 
     ⚠️ 断言走**真实的** :meth:`list_tools` 而不是读类属性 ``ToolStop.name``：
     前者才是注入路径，将来框架改成「返回别的类」或「多加一个工具」，

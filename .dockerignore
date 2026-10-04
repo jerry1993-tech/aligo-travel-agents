@@ -4,60 +4,60 @@
 #
 # 上下游依赖：
 #   - 上游：由 `docker build` / `docker compose build` 在打包上下文时读取。
-#   - 下游：决定了 `Dockerfile` 里 `COPY third_party/ …` / `COPY src/ …` 实际能拿到什么。
+#   - 下游：决定了 `Dockerfile` 里 `COPY src/ …` 等指令实际能拿到什么。
 #
 # ⚠️ 两个必须分清的目的（**别为了体积去动本文件**）：
 #   1) **密钥不入层**（安全，硬约束）：.env 一旦进上下文就会被 COPY 进去，
 #      而镜像层是可以被 `docker history`/`docker save` 翻出来的 —— 密钥就此泄漏。
 #   2) **避免同一份代码出现两种来源**（正确性）：例如 web/node_modules，
 #      拷进去只会被镜像里的构建流程覆盖，纯属噪声。
-#   体积只是顺带收益。真正的体积大头（third_party 的 .git、ReMe 的 tests）确实被挡掉了，
-#   但那是「本来就不该进构建上下文」的副作用，不是本文件存在的理由。
+#   体积只是顺带收益。真正的体积大头（web/node_modules 935 MB、docs/ 约 6 MB）确实
+#   被挡掉了，但那是「本来就不该进构建上下文」的副作用，不是本文件存在的理由。
 #
 # ------------------------------------------------------------------------------
-# 【实测口径】（2026-10-03 复核，供后续改动时对照）
+# 【实测口径】（2026-10-04 复核，供后续改动时对照）
 # ------------------------------------------------------------------------------
-#   本文件过滤后，构建上下文实测量得 **27.43 MiB（28,763,668 字节）/ 2013 个文件**。
+#   本文件过滤后，构建上下文实测量得 **20.12 MiB（21,095,283 字节）/ 824 个文件**。
+#   （上一版是 27.43 MiB / 2013 个文件；2026-10-04 框架改 pip 包安装、
+#    third_party/ 从仓库移除后随之变小。）
 #
-#   ⚠️ **量法必须写清楚，否则同一个仓库能量出三个不同的数**（这三个数都真实存在）：
-#     · 27.43 MiB —— 文件内容总字节。**推荐口径**，可复现：
+#   ⚠️ **量法必须写清楚，否则同一个仓库能量出三个不同的数**：
+#     · 20.12 MiB —— 文件内容总字节。**推荐口径**，可复现：
 #         docker build --no-cache --output type=local,dest=/tmp/ctx -f- . <<'EOF'
 #         FROM scratch
 #         COPY . /
 #         EOF
 #       然后量 /tmp/ctx。（`--output` 会把过滤后的上下文原样落盘，不含 tar 开销。）
-#     · 30.56 MB —— legacy builder 的 `Sending build context to Docker daemon` 一行。
-#       同一份内容，多了 tar 头与 512 字节对齐，且 MB（十进制）≠ MiB（二进制）。
-#     · 25.84 MB —— `make up-tracing` 构建时 BuildKit 的 `transferring context`。
-#       本文件**上一版**记的就是这个数，现已更正 —— 它偏小的原因是 BuildKit 的
-#       **惰性上下文加载**：只传当前构建真正要 COPY 的 blob，进度还会分几行报，
-#       取到中间任一行都会得到偏小的假数字。别再用它当上下文大小。
+#     · 同一份内容，legacy builder 的 `Sending build context to Docker daemon` 一行
+#       会略大（多出 tar 头与 512 字节对齐，且 MB（十进制）≠ MiB（二进制））。
+#     · BuildKit 的 `transferring context` **不要用来量体积**：它是**惰性上下文加载**，
+#       只传当前构建真正要 COPY 的 blob，进度还会分几行报，取到中间任一行都会得到
+#       偏小的假数字。本文件上一版记的就是这个数，现已更正。
 #     ⚠️ 另有一条同样会骗人的：同一份上下文连跑两次 `docker build`，第二次 BuildKit
-#       的传输量远小于真实值（实测 13.10 MB → 137.68 kB）。本仓库早期版本正是据此
-#       把数字写成了 179.75 kB。
+#       的传输量远小于真实值。别用传输量当上下文大小。
 #
-#   比 2026-09-24 那次（约 7 MB）大了近 4 倍，**不是本文件失效**：P5 把 vite 产物
-#   落进了 `src/server/static/`（**14.69 MiB / 393 个文件**，占上下文过半），
-#   而它是必须进镜像的**运行期资产**（由 app 直接托管，见文末第五节），
-#   不是可以排除的东西。次大的是 `third_party/` 8.28 MiB（.git 与测试已被挡掉）。
+#   比 2026-09-24 那次（约 7 MB）大了近 3 倍，**不是本文件失效**：P5 把 vite 产物
+#   落进了 `src/server/static/`（**14.69 MiB / 393 个文件**，占上下文七成以上），
+#   而它是必须进镜像的**运行期资产**（由 app 直接托管，见文末第三节），
+#   不是可以排除的东西。次大的是 `tests/` 1.74 MiB —— 它进上下文无害
+#   （Dockerfile 只 COPY src/ config/ scripts/ requirements.txt，测试文件不进镜像）。
 #
 #   未过滤时的大头（下面每一条都已被本文件挡掉）：
-#     · `web/node_modules/` —— 937 MB，**现在整个仓库最大的一块**（比 third_party 还大）；
-#     · `third_party/agentscope/.git` 66 MB、`third_party/ReMe/.git` 51 MB；
-#     · `third_party/` 合计 171 MB（磁盘上），image 里只需要其中被 pip 安装的部分；
-#     · `docs/`、`web/dist/`、`workspace/`、`logs/`、各类缓存目录。
-#   于是「挡掉九成以上」这个数量级结论是**稳的**（磁盘上 1.1 GB 的仓库，进上下文的
-#   只有 27 MiB）—— 但别据此推断某个具体字节数，它随 src/ 的增删而变，
+#     · `web/node_modules/` —— 935 MB，**现在整个仓库最大的一块**；
+#     · `docs/` 约 6 MB、各类缓存目录、本地虚拟环境。
+#     （框架源码树已于 2026-10-04 随「框架改 pip 包安装」从仓库移除 ——
+#      它是 pip 依赖，构建上下文里不再有、也不需要有它。）
+#   于是「挡掉九成以上」这个数量级结论是**稳的**（磁盘上 1 GB 量级的仓库，进上下文的
+#   只有 20 MiB）—— 但别据此推断某个具体字节数，它随 src/ 的增删而变，
 #   **要精确值请按上面那条推荐口径自己量**。
 #   ⚠️ 反面教材（本文件早期版本写过的量法，**已作废，别再用**）：
 #       docker build --no-cache -f- . <<'EOF'
 #       FROM scratch
 #       EOF
 #     这条 Dockerfile **没有任何 COPY**，而 BuildKit 是惰性加载上下文的 ——
-#     它只传构建真正要用的 blob，于是同一份 27 MiB 的上下文会报成 **8.29 kB**。
-#     看见远小于预期的数，先怀疑量法，再怀疑 .dockerignore 失效。
-#   ⚠️ 第二类误导：BuildKit 会把**一次**传输分几行报进度，只有末行带 `done`：
-#      本次实测依次是 6.30 MB → 12.88 MB → 24.17 MB → **25.84 MB done**。
+#     它只传构建真正要用的 blob，于是上下文会报成一个远小于真实值的数
+#     （本仓库实测过 8.29 kB）。看见远小于预期的数，先怀疑量法，再怀疑本文件失效。
+#   ⚠️ 第二类误导：BuildKit 会把**一次**传输分几行报进度，只有末行带 `done`。
 #      取中间任何一行都会得到一个偏小的假数字，而它看起来同样像个结论。
 # ==============================================================================
 
@@ -106,65 +106,13 @@ env/
 
 
 # ------------------------------------------------------------------------------
-# 三、vendored 源码树中「不参与构建」的部分
+# 三、本项目自身的非构建产物
 # ------------------------------------------------------------------------------
-# third_party/ 是构建**必需**的：Dockerfile 要在这里 pip install 两个源码包。
-# 但两个仓库里各自带了大量与安装无关的东西，逐类排除：
-#
-# ReMe 的 .git 单目录即 52 MB，是上下文里最大的一块，且 pip 完全不需要它。
-third_party/ReMe/.git/
-third_party/ReMe/.github/
-third_party/ReMe/docs/
-third_party/ReMe/tests/
-third_party/ReMe/examples/
-third_party/agentscope/.git/
-third_party/agentscope/.github/
-third_party/agentscope/docs/
-third_party/agentscope/tests/
-third_party/agentscope/examples/
-# 两个仓库自带的构建/开发产物
-third_party/**/node_modules/
-third_party/**/dist/
-third_party/**/build/
-third_party/**/.pytest_cache/
-third_party/**/.mypy_cache/
-# 图片等纯展示资产
-third_party/**/*.png
-third_party/**/*.jpg
-third_party/**/*.jpeg
-third_party/**/*.gif
-third_party/**/*.svg
-third_party/**/*.mp4
-# ⚠️ 但**必须放行** SKILL.md 与各类 yaml/json 资源 —— 见下一节。
-
-
-# ------------------------------------------------------------------------------
-# 四、显式保留（`!` 规则）—— vendored 包的**运行期资产**
-# ------------------------------------------------------------------------------
-# Dockerfile 的 COPY 段注释写明了：third_party/ 进镜像**不是为了 import**
-# （agentscope / reme 已装进 /opt/venv 的 site-packages），而是为了**运行期资产**。
-# 最典型的一例：`third_party/ReMe/skills/<技能名>/SKILL.md` 位于 ReMe **仓库根级**、
-# **不在 `reme` 包内**，因此 `pip install` 不会把它带进 site-packages；而 ReMe 运行期
-# 要求技能目录下存在 SKILL.md，缺失即抛 FileNotFoundError。
-#
-# 上面的排除规则里没有任何一条会命中 SKILL.md，正常情况下无需下面的 `!`；
-# 之所以仍然显式写出来，是为了让「SKILL.md 必须进镜像」这件事**在本文件里可见**：
-# 将来若有人加了 `third_party/**/*.md` 这类粗暴排除，这里的 `!` 会立刻把它顶回来，
-# 而不是等到运行期才以一个 FileNotFoundError 的形式暴露。
-!third_party/ReMe/skills/**
-!third_party/**/SKILL.md
-# py.typed 是 PEP 561 的类型标记，缺它会让下游的类型检查静默失效。
-!third_party/**/py.typed
-# 两个包各自的依赖清单/构建脚本，pip install 时要读。
-!third_party/**/pyproject.toml
-!third_party/**/setup.py
-!third_party/**/setup.cfg
-!third_party/**/_version.py
-
-
-# ------------------------------------------------------------------------------
-# 五、本项目自身的非构建产物
-# ------------------------------------------------------------------------------
+# ⚠️ 2026-10-04 起，本文件**不再有 third_party/ 相关的排除与放行规则**：
+#    两个框架包（agentscope / reme-ai）已改为 pip 依赖（钉在 requirements.txt
+#    第 零 节），仓库里没有 vendored 源码树，构建上下文里自然也没有它。
+#    原「vendored 源码树排除」与「SKILL.md 等运行期资产放行」两节随之删除 ——
+#    框架源码与技能资产都随**安装好的包**进 /opt/venv，不再经由构建上下文。
 # 文档与前端依赖不进镜像：docs/ 里是博客原文与配图（约 20 张图，纯展示）；
 # web/ 的 node_modules 由前端构建阶段自己装。二者与 Python 服务镜像无关。
 docs/

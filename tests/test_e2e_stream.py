@@ -353,9 +353,9 @@ async def wait_for_log_trim(
         框架的清理**不在**回复路径上同步执行。``_service/_chat.py`` 把落库与
         ``log_trim`` 一起放进一个**后台任务**里::
 
-            persist_task = asyncio.create_task(_persist())   # app/_service/_chat.py:1497
+            persist_task = asyncio.create_task(_persist())   # agentscope/app/_service/_chat.py:1497
             ...
-            await self._message_bus.log_trim(events_key)      # app/_service/_chat.py:1470
+            await self._message_bus.log_trim(events_key)      # agentscope/app/_service/_chat.py:1470
 
         而 ``log_trim`` 在内存总线上的实现是 ``self._logs.pop(key, None)``。
 
@@ -736,7 +736,7 @@ async def test_reconnect_after_reply_gets_heartbeat_but_no_replay(
         而不是在修缺陷。
 
     ⚠️⚠️ **「一轮一清」是异步的，中间有一个真实窗口。** 落库与 ``log_trim``
-        都在 ``asyncio.create_task(_persist())`` 里跑（``_service/_chat.py:1497``），
+        都在 ``asyncio.create_task(_persist())`` 里跑（``agentscope/app/_service/_chat.py:1497``），
         所以「客户端收到 REPLY_END」与「日志被清掉」之间约 50ms 内重连，
         会收到**整轮回放**（本机实测，见 :func:`wait_for_log_trim`）。
         那是清理没跑完，不是补发历史的功能 —— 但它对前端是可见的，
@@ -1046,17 +1046,17 @@ async def test_hint_blocks_never_reach_the_user(live_server: LiveServer) -> None
     :mod:`src.orchestration.hint_filter` 的模块文档）：
 
         1. 框架把运行时状态包成 ``HintBlock`` 追加进上下文，并 yield 一个
-           ``HintBlockEvent``（``agent/_agent.py:1629-1639``）；
+           ``HintBlockEvent``（``agentscope/agent/_agent.py:1629-1639``）；
         2. ``ChatService`` 把每个事件**无条件**转发到消息总线
-           （``app/_service/_chat.py:1250-1269``），SSE 再原样推给浏览器；
+           （``agentscope/app/_service/_chat.py:1250-1269``），SSE 再原样推给浏览器；
         3. ``Msg.append_event`` 对 ``HINT_BLOCK`` 的处理是把它**追加进消息
-           content**（``message/_base.py:372-382``，注释写明 "for persistence
+           content**（``agentscope/message/_base.py:372-382``，注释写明 "for persistence
            and replay"），于是 ``upsert_message`` 之后
            ``GET /sessions/{id}/messages`` 每次都把它带回来。
 
     用户看到的是一段**英文提示词**——默认模板的第一句是
     ``"Treat the following as the ground truth at this point of the
-    conversation. ..."``（``agent/_config.py:285-292``），外面还裹着
+    conversation. ..."``（``agentscope/agent/_config.py:288-294``），外面还裹着
     ``<system-reminder>`` 标签。对这些块，用户的身份是**局外人**：
     它们的读者是模型和别的智能体。
 
@@ -1122,7 +1122,7 @@ async def test_hint_blocks_never_reach_the_user(live_server: LiveServer) -> None
 
     # ⚠️ 判据是**落库后的形状**，不是事件类型名。这一点是实测校正的：
     # ``Msg.append_event`` 把 HintBlockEvent 转成 content 里的
-    # ``{"type": "hint", "hint": ...}``（``message/_base.py:372-382``），
+    # ``{"type": "hint", "hint": ...}``（``agentscope/message/_base.py:372-382``），
     # 于是 ``"HINT_BLOCK"`` 这个字符串在响应里**根本不出现** ——
     # 照那个去断言是一条永远不会红的摆设。
     # ⚠️ 子串先落到变量里再进 f-string：Python 3.11 的 f-string 表达式部分
@@ -1134,7 +1134,7 @@ async def test_hint_blocks_never_reach_the_user(live_server: LiveServer) -> None
         f"    命中位置：{_excerpt_around(persisted, hint_block_marker)}"
     )
     # ⚠️ 兜底关键字：上面那条依赖框架把块标成 ``hint``；这段英文提示词是
-    # **框架默认模板原文**（``agent/_config.py:285-292``），它在响应里出现
+    # **框架默认模板原文**（``agentscope/agent/_config.py:285-292``），它在响应里出现
     # 只可能来自提示块 —— 换了字段名它照样抓得住。
     assert "<system-reminder>" not in persisted, (
         "历史消息里出现了 <system-reminder> 提示词原文 —— 用户能看到英文提示词。\n"

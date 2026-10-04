@@ -535,7 +535,7 @@ class _FakeEmbedding(EmbeddingModelBase):
         self.error = error
         self.calls = 0
         # ⚠️ 在**实例**上设置（与 ``DashScopeEmbeddingModel`` 一致，
-        # 见 ``_dashscope/_model.py:148``）—— 基类的类属性恒为 False，
+        # 见 ``agentscope/embedding/_dashscope/_model.py:160``）—— 基类的类属性恒为 False，
         # 只有实例属性才能验证「包装层有没有把它复制过去」。
         self.supports_multimodal = multimodal
 
@@ -627,8 +627,8 @@ def test_the_real_error_is_not_disguised_as_a_timeout() -> None:
 def test_the_wrapper_copies_the_identity_attributes() -> None:
     """★★ 维度与多模态能力必须**复制**到包装层。
 
-    ⚠️ 框架会直接读这两个属性做决策（``rag/_knowledge.py:182`` 用
-    ``dimensions`` 建集合、``:230`` 用 ``supports_multimodal`` 决定
+    ⚠️ 框架会直接读这两个属性做决策（``agentscope/rag/_knowledge.py:182`` 用
+    ``dimensions`` 建集合、``:232-233`` 用 ``supports_multimodal`` 决定
     要不要丢掉 ``DataBlock``）。复制漏了的话：前者表现为
     「集合维度建错」，后者表现为「图片检索永远没有结果」——
     两个都不报错。

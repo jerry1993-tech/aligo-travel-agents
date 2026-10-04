@@ -151,7 +151,7 @@ def test_every_prompt_comes_from_the_prompt_table() -> None:
 def test_subagent_template_renders_with_the_framework_placeholders() -> None:
     """★★ 每个模板都能用框架提供的**五个**占位符渲染出来。
 
-    ⚠️ 已核实（``app/_tool/_agent_create.py:399-405``）：框架对模板做的
+    ⚠️ 已核实（``agentscope/app/_tool/_agent_create.py:399-405``）：框架对模板做的
     唯一处理是 ``str.format``，且**只**提供
     ``team_name / team_description / member_name / member_description /
     leader_name``。
@@ -176,7 +176,7 @@ def test_subagent_template_renders_with_the_framework_placeholders() -> None:
         )
 
 
-def test_the_placeholder_list_matches_the_framework_call_site(repo_dir: Path) -> None:
+def test_the_placeholder_list_matches_the_framework_call_site() -> None:
     """★★★ ``PLACEHOLDERS`` 与框架 ``.format(...)`` 的关键字**逐字相同**。
 
     ⚠️ 这是**唯一**能守住那份名单的用例，而它之所以必须存在，是因为
@@ -200,18 +200,19 @@ def test_the_placeholder_list_matches_the_framework_call_site(repo_dir: Path) ->
       ``ValueError``，而框架其实是能渲染的 —— 一次误报会让人去改一个
       本来没问题的提示词，或者干脆把这条校验删掉。
 
-    ⚠️ 读不到框架源码时**直接失败**，不 skip：``third_party/agentscope``
-    是本仓库的一部分（vendored），它不在才是异常情况，
+    ⚠️ 读不到框架源码时**直接失败**，不 skip：``agentscope`` 是
+    ``requirements.txt`` 第 零 节钉死的 pip 依赖，它不在才是异常情况，
     而一条会自己消失的护栏等于没有护栏。
+
+    调用点的定位用 ``agentscope.__file__``（当前解释器真正 import 的那份），
+    而不是任何写死的路径 —— 换虚拟环境 / 换 Python 版本后仍然准确。
     """
     import re
 
+    import agentscope
+
     call_site = (
-        repo_dir
-        / "third_party"
-        / "agentscope"
-        / "src"
-        / "agentscope"
+        Path(agentscope.__file__).resolve().parent
         / "app"
         / "_tool"
         / "_agent_create.py"
@@ -314,7 +315,7 @@ def test_subagent_template_types_are_unique_and_match_names() -> None:
     """⚠️ 模板类型唯一，且等于智能体名。
 
     ⚠️ ``create_app`` 对重复的 ``type`` 会抛 ``ValueError``
-    （``app/_app.py:375-386``）。这个错误发生在**应用构造期**，
+    （``agentscope/app/_app.py:375-386``）。这个错误发生在**应用构造期**，
     也就是 import 应用的时刻 —— 症状是「服务起不来」，而根因是
     「两个智能体重名」，中间隔着一整条调用链。
     """
@@ -329,7 +330,7 @@ def test_templates_are_a_list_not_a_dict() -> None:
     """★★ 交给 ``create_app`` 的必须是 **list**，不是 dict。
 
     ⚠️ ``create_app`` 的公开参数是 ``list[SubAgentTemplate] | None``；
-    dict 是它**内部**转出来的形态（``app/_app.py:386``）。传 dict 过去，
+    dict 是它**内部**转出来的形态（``agentscope/app/_app.py:386``）。传 dict 过去，
     它会去迭代键（一堆字符串），然后在 ``t.type`` 上崩 ——
     报出来是 ``AttributeError: 'str' object has no attribute 'type'``，
     与「参数类型传错了」这个真实原因隔得很远。

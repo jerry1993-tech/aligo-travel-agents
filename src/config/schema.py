@@ -302,7 +302,7 @@ class RerankSettings(_StrictModel):
     ⚠️ **本框架的重排是 LLM-as-reranker，不是 DashScope 的 TextReRank 接口。**
     ``RAGMiddleware`` 收的是一个 :class:`~agentscope.model.ChatModelBase`，
     再用一段提示词让**对话模型**给候选打分排序
-    （``middleware/_rag.py:85-94`` 是那段提示词，``:153`` 是构造参数）。
+    （``agentscope/middleware/_rag.py:85-94`` 是那段提示词，``:804`` 是构造参数）。
     所以 ``model`` 要填**对话模型**名；填 ``qwen3-rerank`` 这类
     **专用重排模型**名会在调用时报错 —— 框架对重排失败是尽力而为
     （``_rag.py`` 里吞掉异常、退回向量序），症状是「重排看起来配了但没有效果」。

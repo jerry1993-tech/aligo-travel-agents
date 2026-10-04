@@ -14,13 +14,13 @@
 这是本文件与 ``src/tools/travel.py`` 最要紧的差别，也是整个 P3 里最容易
 做错的一处。
 
-已核实（``tool/_adapters.py:116-135``）：``FunctionTool`` 未显式传
+已核实（``agentscope/tool/_adapters.py:116-135``）：``FunctionTool`` 未显式传
 ``permission`` 时，权限引擎收到的是 ``PermissionDecision(behavior=ASK)``，
 agent 会发一个 ``RequireUserConfirmEvent`` 并**暂停**，等用户点确认。
 
 ⚠️ 只读工具的「不确认」**不是**来自工具的 ``check_permissions`` ——
 对它直接调用仍然返回 ASK。放行发生在引擎的只读快速通道
-（``permission/_engine.py:659-687``，``_check_default`` 在 ``:170`` 调用），
+（``agentscope/permission/_engine.py:659-687``，``_check_default`` 在 ``:170`` 调用），
 在工具的 ``check_permissions`` **之前**。详见 ``src/tools/travel.py`` 的说明。
 
 于是同一份代码有两种看似合理的写法，**结果却完全相反**：

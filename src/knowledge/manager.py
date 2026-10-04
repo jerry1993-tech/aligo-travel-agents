@@ -4,7 +4,7 @@
 ═══ ⚠️ 为什么不能用框架自带的 ``CollectionPerKbManager`` ═══
 
 框架唯一的 KB 管理器是 :class:`~agentscope.app.rag.CollectionPerKbManager`，
-**每个知识库一个集合**，集合名 ``kb_<uuid>``（``_collection_per_kb.py:89``）。
+**每个知识库一个集合**，集合名 ``kb_<uuid>``（``agentscope/app/rag/knowledge_base_manager/_collection_per_kb.py:89``）。
 本项目用的是**单集合**策略：契约写死了
 ``ALIGO__MILVUS__COLLECTION=aligo_travel_policy_dev``，所有知识库共用它，
 靠 ``metadata_filter`` 做 KB / 租户隔离。
@@ -239,7 +239,7 @@ class SingleCollectionKbManager(KnowledgeBaseManagerBase):
 
         ⚠️⚠️ 这是与框架 per-KB 实现最要命的一处差异。框架的实现是
         ``delete_collection(record.data.collection_name)``
-        （``_collection_per_kb.py:142-144``）—— 在单集合策略下，
+        （``agentscope/app/rag/knowledge_base_manager/_collection_per_kb.py:142-144``）—— 在单集合策略下，
         ``collection_name`` 对**每一个** KB 都是同一个值，
         于是「删掉一个知识库」= 「删掉所有人的知识库」。
 
@@ -318,7 +318,7 @@ class SingleCollectionKbManager(KnowledgeBaseManagerBase):
 
         ═══ 为什么必须有第二跳 ═══
 
-        框架的实现只查属主（``_collection_per_kb.py:187-195``），并在那里
+        框架的实现只查属主（``agentscope/app/rag/knowledge_base_manager/_collection_per_kb.py:187-195``），并在那里
         写下了它所依赖的前提：「KB 管理器是属主内部路径，凭据与知识库
         同属一个属主」。这个前提在本项目里**不再成立**：
 
@@ -331,7 +331,7 @@ class SingleCollectionKbManager(KnowledgeBaseManagerBase):
         用户据此建出来的 KB，记录里钉的是一个**别人的** credential_id。
         到 ``get_knowledge`` 时按属主一查 —— 查不到 ⇒
         ``KnowledgeBaseNotFoundError`` ⇒ 对话链路把它记成
-        「Skipping knowledge base」（``app/_service/_chat.py:1044`` 附近，
+        「Skipping knowledge base」（``agentscope/app/_service/_chat.py:1048-1059``，
         异常被吞、只留一条日志）⇒ **知识库静默失效**，而上传、索引、
         前端列表全都显示正常。这正是本项目最想消灭的那类故障：
         探针全绿、界面正常、功能不在。

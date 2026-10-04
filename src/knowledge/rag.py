@@ -502,7 +502,7 @@ async def build_rag_middlewares(
             便于测试替身。
         rerank_model (`ChatModelBase | None`, optional): 可选的重排模型，
             原样透传给 :class:`RAGMiddleware`。⚠️ 重排是**尽力而为**的：
-            它失败时中间件会退回向量序（``_rag.py:439-445``），
+            它失败时中间件会退回向量序（``agentscope/middleware/_rag.py:439-445``），
             不会让检索整体失败。
         mode (`Literal["static", "agentic"]`, optional): 检索模式，默认
             ``"agentic"``（把 ``search_knowledge`` 工具交给模型，由它决定

@@ -15,7 +15,7 @@
     Starlette 的 ``add_middleware`` 内部是 ``user_middleware.insert(0, ...)``，
     也就是**后加的在外层**。而 ``agentscope.app.create_app`` 是按我们传入的
     ``extra_middlewares`` 列表**顺序**逐个 ``add_middleware`` 的
-    （``app/_app.py:428-429``），于是：
+    （``agentscope/app/_app.py:428-429``），于是：
 
         传入 ``[A, B, C]``  ⇒  实际执行顺序 ``C → B → A → 应用``
 

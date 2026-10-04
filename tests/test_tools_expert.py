@@ -174,7 +174,7 @@ def test_the_tool_is_read_only() -> None:
     ⚠️ 断言的是 ``is_read_only``，**不是**去调 ``check_permissions()`` ——
     后者对只读工具也会返回 ``ASK``（已核实：``FunctionTool`` 不传
     ``permission`` 时一律 ``PermissionDecision(behavior=ASK)``，
-    ``tool/_adapters.py:116-135``）。只看那个返回值会得出**相反**的结论，
+    ``agentscope/tool/_adapters.py:116-135``）。只看那个返回值会得出**相反**的结论，
     从而把这条护栏删掉。
     """
     tool, _ = build()

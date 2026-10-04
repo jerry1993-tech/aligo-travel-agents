@@ -28,7 +28,7 @@
 
 ``Agent.reply_stream`` 直接产出的是 **pydantic 对象**；而
 ``agentscope.app`` 的服务层在把事件发到消息总线之前会做一次
-``event.model_dump(mode="json")``（``app/_service/_chat.py:1345-1350``），
+``event.model_dump(mode="json")``（``agentscope/app/_service/_chat.py:1355-1359``），
 于是从**总线/SSE 路径**拿到的全是**普通字典**。
 
 本模块两种都收（``_field()`` 是唯一取值入口）。这不是防御性编程：
@@ -50,7 +50,7 @@
 ``TOOL_CALL_START`` 只带 ``tool_call_name`` 与 ``tool_call_id``；
 参数以 JSON 字符串**片段**的形式，一条一条地出现在 ``TOOL_CALL_DELTA``
 的 ``delta`` 字段里；``TOOL_CALL_END`` **只有 ``tool_call_id``**
-（``event/_event.py:313-347``）。
+（``agentscope/event/_event.py:313-347``）。
 
 所以「拿到一个完整的工具调用」= 从 START 收名字、从若干 DELTA 拼参数、
 到 END 才**第一次**凑齐。本模块因此把 ``collector.plan()`` 放在
@@ -74,7 +74,7 @@
 
 ═══ 四、同一个 ``reply_id`` 的 ``REPLY_START`` **不是**新回复 ═══
 
-已核实（``app/_service/_chat.py:1332-1341``）：HITL 确认之后，服务层会
+已核实（``agentscope/app/_service/_chat.py:1329-1344``）：HITL 确认之后，服务层会
 补发一个 **``reply_id`` 与暂停前相同**的 ``ReplyStartEvent``，框架自己的
 注释写着「SSE 处理器**不得**因为收到相同 ``reply_id`` 的 ``REPLY_START``
 就清空累积的缓冲区 —— 这个事件表示**续接**，不是新回复」。
@@ -86,7 +86,7 @@
 
 ═══ ⚠️ ``EXCEED_MAX_ITERS`` 事件**已被框架标记为废弃** ═══
 
-``event/_event.py:425-431``：``ExceedMaxItersEvent`` 带 ``@deprecated``，
+``agentscope/event/_event.py:425-431``：``ExceedMaxItersEvent`` 带 ``@deprecated``，
 文档字符串写着「仍为向后兼容而发出，但**不携带语义**；请改用
 ``ReplyEndEvent.finished_reason``」。本地版本目前两处都发，但事件本身
 随时可能被移除 —— 只认它就等于把「任务收尾」这件功能押在一个已宣布
@@ -103,7 +103,7 @@
   ``<EventType.REPLY_START: 'REPLY_START'>``，``isinstance(e.type,
   EventType)`` 为真，``e.type is EventType.REPLY_START`` **也为真**。
   原因是每个事件的 ``type`` 声明成 ``Literal[EventType.X]``
-  （``event/_event.py:85`` 等），pydantic 不会把它降级成字符串。
+  （``agentscope/event/_event.py:85`` 等），pydantic 不会把它降级成字符串。
 
 - **字典形态**（框架 SSE 路径上 ``model_dump(mode="json")`` 之后，
   见 ``app/_service/_chat.py``）：``type`` 被序列化成**普通字符串**
@@ -173,7 +173,7 @@ def _field(event: Any, name: str, default: Any = None) -> Any:
     ⚠️ 这个函数不是多余的防御性编程，它对应一个已核实的**事实**：
     ``agentscope.app`` 往消息总线上发的**所有**事件都是
     ``event.model_dump(mode="json")`` 的产物 —— 也就是普通字典
-    （``app/_service/_chat.py:1345-1350``，连它自己补发的续接
+    （``agentscope/app/_service/_chat.py:1355-1359``，连它自己补发的续接
     ``REPLY_START`` 也是 ``:1340-1344``）。
 
     两种形态的差别在这里是致命的：``getattr(字典, "type", None)``
@@ -327,7 +327,7 @@ class EventChainAdapter:
         """消费一整条事件流直到结束。
 
         ⚠️ 只处理 ``AgentEvent``，**丢弃**流里的 ``Msg``。``reply_stream``
-        的产出类型是 ``AgentEvent | Msg``（``agent/_agent.py:288-298``），
+        的产出类型是 ``AgentEvent | Msg``（``agentscope/agent/_agent.py:288-298``），
         而最终那条 ``Msg`` 承载的是结构化结果，与任务清单无关 ——
         它的消费方是调用方自己，本适配器只负责把它丢掉。
 
@@ -400,7 +400,7 @@ class EventChainAdapter:
         清掉它等于把界面上正在显示的内容抹掉。
 
         ⚠️⚠️ **``reply_id`` 相同则是「续接」，一切照旧。** 已核实
-        （``app/_service/_chat.py:1332-1341``）：人工确认之后服务层会补发
+        （``agentscope/app/_service/_chat.py:1329-1344``）：人工确认之后服务层会补发
         一个 ``reply_id`` 与暂停前相同的 ``ReplyStartEvent``，框架的注释
         明确要求消费者「不得因为收到相同 ``reply_id`` 的 ``REPLY_START``
         就清空累积的缓冲区」。
@@ -611,7 +611,7 @@ class EventChainAdapter:
         以为要逐个处理。
 
         ⚠️ **每条事件只带一个**调用，这一点很容易猜错。已核实
-        （``agent/_agent.py:2574-2577``）：框架是**每个被挂起的工具调用各发
+        （``agentscope/agent/_agent.py:2574-2577``）：框架是**每个被挂起的工具调用各发
         一条** ``RequireUserConfirmEvent``，且 ``tool_calls=[tool_call]``
         长度**恒为 1**。所以「有几项待确认」**不能**取 ``len(tool_calls)``
         —— 那个数永远是 1，界面于是在有 5 个调用等人确认时写着
@@ -657,7 +657,7 @@ class EventChainAdapter:
         处置是「完成，并说明用户没有同意」，见下面的 ``ok=True``。
 
         ⚠️ 判据字段是 ``confirmed``，**不是** ``approved``
-        （``event/_event.py:468-473`` 的 ``ConfirmResult``）。
+        （``agentscope/event/_event.py:468-473`` 的 ``ConfirmResult``）。
         写错字段名的后果很隐蔽：``_field(item, "approved", False)``
         永远取到 ``False``，界面于是在用户明明点了同意之后显示
         「用户已确认 0/1 项操作」—— 一句在关键路径上主动误导人的文案，
@@ -700,7 +700,7 @@ class EventChainAdapter:
             ``COMPLETED``    —— 正常结束，可能正等着人工确认 → 什么都不做
             ``INTERRUPTED``  —— 用户中断；框架**已经**为在途调用补发了
                                 ``INTERRUPTED`` 的工具结果
-                                （``agent/_agent.py:1008-1031``）→ 什么都不做
+                                （``agentscope/agent/_agent.py:1008-1031``）→ 什么都不做
             ``EXCEED_MAX_ITERS`` / ``ERROR`` —— 系统放弃了本轮，那些
                                 ``DOING`` 的任务不会再有结果 → 收成失败
 
@@ -728,11 +728,11 @@ class EventChainAdapter:
     def _on_exceed_max_iters(self, event: Any) -> None:
         """迭代上限事件：**废弃事件的向后兼容入口**。
 
-        ⚠️ 已核实（``event/_event.py:425-431``）：``ExceedMaxItersEvent``
+        ⚠️ 已核实（``agentscope/event/_event.py:425-431``）：``ExceedMaxItersEvent``
         带 ``@deprecated``，文档字符串写着「仍为向后兼容而发出，但**不携带
         语义**；请改用 ``ReplyEndEvent.finished_reason``」。
 
-        本地版本目前两处都发（``agent/_agent.py:3599`` 等），且事件顺序是
+        本地版本目前两处都发（``agentscope/agent/_agent.py:3599`` 等），且事件顺序是
         先 ``EXCEED_MAX_ITERS`` 后 ``REPLY_END``。保留这个分支，是因为
         旧版本框架只发这一个事件；真正的语义来源是
         :meth:`_on_reply_end`。两边都幂等，先到的那次收尾，后到的那次
@@ -806,7 +806,7 @@ _FAILURE_TEXT: dict[Any, str] = {
 #:
 #: ⚠️ 抽成常量而不是在 :meth:`EventChainAdapter.consume_stream` 里直接写
 #: ``isinstance(event, Msg)``：``reply_stream`` 的产出联合类型
-#: （``agent/_agent.py:288-298``）里 ``Msg`` 只有一种，但把它单列出来是为了
+#: （``agentscope/agent/_agent.py:288-298``）里 ``Msg`` 只有一种，但把它单列出来是为了
 #: 让「哪些类型的元素会被跳过」这件事有一个可搜索的位置 ——
 #: 漏跳过一种类型的症状是「思考链里混进一条普通消息」，
 #: 那种 bug 不会报错，只会让界面多出一行看不懂的东西。

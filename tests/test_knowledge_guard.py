@@ -31,7 +31,7 @@
       5. **读操作的覆盖面**。``_GUARDED_OPERATIONS`` 里每个名字都必须
          真的被实现、且真的被箍住 —— 尤其是 ``has_collection``：它挂在
          框架 ``KnowledgeBase.search() → ensure_collection()`` 的必经之路上
-         （``rag/_knowledge.py:179``），漏掉它 = 漏掉整条检索路径。
+         （``agentscope/rag/_knowledge.py:179``），漏掉它 = 漏掉整条检索路径。
       6. **建连不许占着事件循环**。``get_client()`` 是 ``to_thread`` 的
         实参，默认在事件循环线程上求值；它一旦同步阻塞，``wait_for``
          的超时回调排不上队，护栏在纸面上存在、实际整台服务假死。
@@ -116,7 +116,7 @@ class _FakeStore:
 
     # ⚠️ 它们也在护栏的覆盖清单里：框架的 ``search`` 每次先问
     # ``has_collection`` 集合在不在，答「不在」就直接 ``create_collection``
-    # （``rag/_knowledge.py:179``）—— 也就是说这两个名字上「不像读」的方法
+    # （``agentscope/rag/_knowledge.py:179``）—— 也就是说这两个名字上「不像读」的方法
     # 实际上会在检索路径上被调用。替身必须实现，否则参数化的
     # 「每个被声明的操作都要有界」用例会因为替身缺方法而失败，
     # 掩盖真正的问题。
@@ -223,7 +223,7 @@ async def test_every_declared_guarded_operation_is_actually_wrapped(
     ⚠️ 这条用例的存在理由是一次真实审计发现的洞：``has_collection``
     只写在模块文档的「不箍」列表里，而它恰恰挂在框架
     ``KnowledgeBase.search() → ensure_collection()`` 的必经之路上
-    （``rag/_knowledge.py:179``）—— 卡住它，用户看到的现象与卡住
+    （``agentscope/rag/_knowledge.py:179``）—— 卡住它，用户看到的现象与卡住
     ``search`` **完全一样**，但护栏对它视而不见。
     """
     assert operation in GuardedVectorStore.__dict__, (
@@ -249,7 +249,7 @@ async def test_a_hung_create_collection_is_bounded_on_the_read_path() -> None:
 
     ⚠️ 这条守的是 ``_GUARDED_OPERATIONS`` 里**最反直觉**的那个名字：
     框架的 ``KnowledgeBase.ensure_collection()`` 在 ``has_collection``
-    答「没有」时会调 ``create_collection``（``rag/_knowledge.py:179``），
+    答「没有」时会调 ``create_collection``（``agentscope/rag/_knowledge.py:179``），
     而那是由 ``search()`` 触发的（``:237``）。只箍读、不箍写的版本
     在这里会把「集合不存在」这个**可预期的**状态，变成整个服务在
     唯一没有护栏的那一步上假死。
@@ -720,7 +720,7 @@ async def test_the_client_is_warmed_on_a_worker_thread() -> None:
     class _ClientfulStore(_FakeStore):
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
-            # 复刻框架的缓存字段（``_vdb/_milvus_lite.py:75``）。
+            # 复刻框架的缓存字段（``agentscope/rag/_vdb/_milvus_lite.py:75``）。
             self._client: object | None = None
             self.client_threads: list[int] = []
 
@@ -879,7 +879,7 @@ class _LazyClientStore:
 
     只做两件事，且都是框架真实行为：
 
-      · ``_client`` 是缓存字段（框架在 ``_vdb/_milvus_lite.py:75`` 定义），
+      · ``_client`` 是缓存字段（框架在 ``agentscope/rag/_vdb/_milvus_lite.py:75`` 定义），
         护栏会读它做快路径判断；
       · ``get_client()`` 是**同步**函数，且**自己不是并发安全的** ——
         ``if self._client is None: self._client = MilvusClient(...)``。

@@ -174,7 +174,7 @@ db:
   statement_timeout_seconds: 10.0
   # 启动时自动建表。这是 AgentScope `AsyncSQLAlchemyStorage` 的 create_tables 参数。
   # ⚠️ 与之配对的 `auto_migrate` 在本项目里**恒为 False**，且不对外暴露成配置项：
-  #    框架源码明确警告多副本并发迁移不安全（_storage.py:137-142），故由本开关建表、
+  #    框架源码明确警告多副本并发迁移不安全（agentscope/app/storage/_sql/_storage.py:137-142），故由本开关建表、
   #    由 alembic 负责业务 schema 的迁移。生产若要多副本，请把本项改为 false 并预跑迁移。
   create_tables: true
   # 是否把 SQL 打印到日志。仅本地排障时打开，**生产必须关**（会把数据写进日志）。
@@ -322,7 +322,7 @@ llm:
   # 单次请求超时（秒）。覆盖建连与读取两段，最终落到 httpx 的 timeout 上。
   timeout_seconds: 60.0
   # 最大重试次数。⚠️ 框架的重试是**固定间隔、无指数退避**的
-  # （third_party/agentscope/src/agentscope/model/_base.py:206-252），且只对
+  # （agentscope/model/_base.py:206-252），且只对
   # 「可重试异常」生效。持续失败由下面的熔断器处理，二者分工明确。
   max_retries: 2
   # 重试之间的固定等待（秒）。与 max_retries 配对使用。

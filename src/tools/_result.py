@@ -10,7 +10,7 @@
 
 ═══ 为什么工具不能随便返回字符串 ═══
 
-已核实的框架行为（``tool/_adapters.py:176-192``）：工具函数的返回值会被
+已核实的框架行为（``agentscope/tool/_adapters.py:176-192``）：工具函数的返回值会被
 **归一化**——
 
     ToolChunk      → 原样使用
@@ -54,7 +54,7 @@ JSON，会开始瞎猜字段含义；只留 ``summary``，前端只能渲染纯�
 ═══ 为什么错误也走同一个格式 ═══
 
 已核实：工具内抛出的异常会被 ``call_tool`` 吞掉，转成
-``ToolChunk(state=ERROR, text=str(e))`` 交给模型（``tool/_toolkit.py:356-372``）。
+``ToolChunk(state=ERROR, text=str(e))`` 交给模型（``agentscope/tool/_toolkit.py:356-372``）。
 这意味着**抛异常不等于失败得更严重**，只是拿到一段没有格式的英文异常文本。
 用户会看到「Error: division by zero」这种东西。
 

@@ -22,7 +22,7 @@
 1. ``custom_agent_cls`` 是**全局单例**，在 ``create_app`` 时定下，对主智能体
    与 ``AgentCreate`` 产生的所有子智能体**同时生效**，无法按会话区分；
 2. 更糟的是它的失败模式：``__init__`` 签名不兼容时，异常会在
-   ``app/_service/_chat.py:1177`` 的宽 ``except`` 里被吞掉，**静默退化成
+   ``agentscope/app/_service/_chat.py:1177`` 的宽 ``except`` 里被吞掉，**静默退化成
    一条「回复失败」事件** —— 没有堆栈、没有告警，只有用户看到「系统繁忙」。
 
 ``on_system_prompt`` 没有这两个问题：它是**按 agent 实例**装配的（走
@@ -31,11 +31,11 @@
 
 ═══ 这个钩子的两条硬约束（均已核实） ═══
 
-1. **每轮推理都会被调用一次**（``agent/_agent.py:1728 → 3216 → 3251``）。
+1. **每轮推理都会被调用一次**（``agentscope/agent/_agent.py:1728 → 3216 → 3251``）。
    一次回复里模型推理几轮，本钩子就跑几次。所以解析器必须便宜，
    且**结果要按回复缓存** —— 见 :meth:`_resolve`。
 2. **返回值是「整个 system prompt 的最终串」**，不是追加内容
-   （``agent/_agent.py:3237`` 是 ``result = await mw.on_system_prompt(self, result)``，
+   （``agentscope/agent/_agent.py:3237`` 是 ``result = await mw.on_system_prompt(self, result)``，
    逐个中间件串行链式调用）。所以必须**基于** ``current_prompt`` 拼装 ——
    直接返回自己那一段会把框架的 base prompt、skills、offloader 全部丢掉。
 """
@@ -175,7 +175,7 @@ class PromptContext:
 #:
 #: ⚠️ **返回值可以是 awaitable**（P4 放宽）。这条放宽是为了长期画像：
 #: 它要查业务库与向量库，两者都是 I/O，而 ``on_system_prompt`` 本身
-#: 就是 ``async def``（``agent/_agent.py:3237`` 是 ``await mw.on_system_prompt(...)``），
+#: 就是 ``async def``（``agentscope/agent/_agent.py:3237`` 是 ``await mw.on_system_prompt(...)``），
 #: 所以把等待能力放开给解析器不需要改动框架的任何一处。
 #:
 #: ⚠️ 放宽是**向后兼容**的：既有的同步解析器（:func:`default_resolver`

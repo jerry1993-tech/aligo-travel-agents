@@ -120,7 +120,7 @@ def seed_order(repo: Any, *, user_id: str = USER, order_id: str = "TR-1", **over
 def test_query_orders_is_read_only() -> None:
     """★ 查询工具**必须**是只读的。
 
-    只有只读调用会命中引擎的只读快速通道（``permission/_engine.py:659-687``，
+    只有只读调用会命中引擎的只读快速通道（``agentscope/permission/_engine.py:659-687``，
     ``_check_default`` 在 ``:170`` 调用），不再弹确认窗。少了这个标记，
     用户每点一次「查订单」都要点一次「允许」。
     """

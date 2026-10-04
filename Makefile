@@ -187,7 +187,7 @@ help:
 	@echo "    make preflight     启动前修复：补齐 postgres 初始化脚本的可执行位（up* 自动依赖它）"
 	@echo "    make clean         停止服务并删除数据卷（⚠️ 数据库/向量库/日志全部清空，不可恢复）"
 	@echo "    make clean-gen     清理本地缓存（__pycache__/.pytest_cache/.coverage/htmlcov），"
-	@echo "                       不动容器与卷；**跳过 third_party/**（那份源码树按约定不改动）"
+	@echo "                       不动容器与卷"
 	@echo "    make clean-all     clean + clean-gen —— ⚠️ **含 clean，会不可恢复地删掉全部数据卷**"
 	@echo "                       （等于先跑一次 make clean 再跑 clean-gen；不清镜像）"
 	@echo ""
@@ -458,12 +458,13 @@ pull:
 # ------------------------------------------------------------------------------
 # test —— 跑 pytest。不依赖 Docker：健康检查测试用 sqlite 内存库替代 PostgreSQL。
 # ------------------------------------------------------------------------------
-# PYTHONPATH 只给仓库根（让 `import src.*` 可用），**刻意不再指向 third_party**：
-#   agentscope / reme 已装在当前 Python 环境里，直接 import 即可。
+# PYTHONPATH 只给仓库根（让 `import src.*` 可用），不给任何依赖包路径：
+#   agentscope / reme 由 `pip install -r requirements.txt` 装进当前 Python 环境，
+#   直接 import 即可；容器内由 Dockerfile 用**同一份**清单安装。
 #   由安装元数据决定解析结果，比在命令行里硬编码一条路径更稳 —— 硬编码的路径
 #   在换机器/进容器后会静默失效。
-#   ⚠️ 注意：这不等于"本地与容器必然同代码"。实测各有错位（本机 reme 是 PyPI 的
-#   0.4.1.12，容器装的是仓库源码的 0.4.1.13），详见 README「三条硬性约定」第 2、3 条。
+#   ✅ 本地与容器装的是同一份钉版清单（仓库里已无 vendored 源码树），
+#      不再存在「本地一套、容器另一套」的错位。
 test:
 	@echo "▶ 运行 pytest（本地模式，无需 Docker）..."
 	PYTHONPATH=$(CURDIR) \
@@ -478,8 +479,9 @@ test:
 # 两个脚本各管一类，**互不越界**（别指望任何一个去干另一个的活）：
 #   scripts/check_doc_refs.py   查「文件在不在 + 行号超没超界」，不看数字；
 #   scripts/check_doc_counts.py 查「数字对不对（== 机器实测值）」，不看行号。
-# 判定范围（refs）:**自有文件与 vendored 代码都判**——vendored 代码我们不改，但文档引它的
-#   行号同样会漂（换 pin 的版本就会），故一并判定；口径与未判定的缺口见该脚本头部注释。
+# 判定范围（refs）:**自有文件与已安装的第三方包都判**——文档大量引用框架/依赖的源码
+#   行号（``agentscope/…`` 等），换 pin 的版本它们同样会漂，故一并判定；
+#   口径与未判定的缺口见该脚本头部注释。
 # ⚠️ 与别的多命令目标不同，这里刻意**不用 `set -e` 短路**：两道闸门相互独立，
 #   第一道红了也应当把第二道的报告一并打出来，免得修一个跑一次。
 #   故用 `|| rc=1` 累计退出码，最后统一以该码退出（任一失败即失败）。
@@ -597,24 +599,22 @@ clean:
 	$(COMPOSE) $(ALL_PROFILES) down -v
 	@echo "✅ 已清理。"
 
-# clean-gen —— 清理本地构建产物与缓存（不动容器与卷，也**不碰 third_party/**）
+# clean-gen —— 清理本地构建产物与缓存（不动容器与卷）
 # ------------------------------------------------------------------------------
-# 两条约束都是被真实隐患逼出来的，不是洁癖：
+# 这条规则是被真实隐患逼出来的，不是洁癖：
 #   1) 路径锚到**本 Makefile 所在目录**（与 preflight 同理）。下面两条原本是相对 CWD 的，
 #      若执行时 CWD 不在仓库根（`make -f 绝对路径/Makefile`、某些 IDE 的 make 集成），
 #      它们删的就是**调用者所在目录**里的东西 —— 在 $HOME 下跑一次就会静默递归删掉
 #      $HOME 子树里所有 __pycache__，而执行者的预期是「清本仓库的缓存」。
-#   2) `-path ./third_party -prune`：third_party/ 是 vendored 源码树，README 与 docs/01
-#      都把它定为「只读、不改动」。不豁免时实测 126 个 __pycache__ 里有 **118 个在
-#      third_party/ 下** —— 等于每次「清缓存」都在那棵树里写改动，会被误判成
-#      「有人改了 vendored 源码」（进而怀疑踩了 README 里「PyPI 同名不同码」的坑）。
+#   2) 仓库里已没有 vendored 源码树（框架改 pip 包安装，见 requirements.txt 第 零 节），
+#      故不再需要对 third_party/ 做 prune 豁免 —— 全仓扫一遍即可。
 clean-gen:
 	@set -eu -o pipefail; \
 	here="$(dir $(lastword $(MAKEFILE_LIST)))"; \
 	cd "$$here"; \
-	find . -path ./third_party -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +; \
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +; \
 	rm -rf .pytest_cache .coverage htmlcov; \
-	echo "✅ 已清理本地缓存（已跳过 third_party/）。"
+	echo "✅ 已清理本地缓存。"
 
 # 兼容别名：一次性全清
 clean-all: clean clean-gen

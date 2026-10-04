@@ -105,7 +105,7 @@ class SpyHandler:
 
         Returns:
             `Any`: 非流式时是 ``ChatResponse``；流式时是**未被迭代**的
-                异步生成器（与 ``model/_base.py:254-290`` 的形状一致）。
+                异步生成器（与 ``agentscope/model/_base.py:254-290`` 的形状一致）。
 
         Raises:
             BaseException: ``raises`` 非 ``None`` 时抛出它。
@@ -306,7 +306,7 @@ def test_the_short_circuit_response_is_last() -> None:
 
     ⚠️ 这条是**防御性**的，不是承重的 —— 写这条注释的人踩过一次，
     值得说清楚：框架只在**流式**分支上读 ``is_last``
-    （``agent/_agent.py:1746-1748``），而本中间件返回的是裸
+    （``agentscope/agent/_agent.py:1746-1748``），而本中间件返回的是裸
     ``ChatResponse``，走的是 ``isinstance(res, ChatResponse)`` 那一支
     （``:1759-1760``），在那里 ``is_last`` **根本不会被读**。
     所以「漏掉它整轮回复会卡住」这个说法在**当前**这条路径上是错的。
@@ -399,9 +399,9 @@ async def _stream(*chunks: Any, boom: BaseException | None = None) -> Any:
 
     ⚠️ 用异步生成器而不是返回一个列表，是因为要紧贴框架的真实形状：
     ``ChatModelBase.__call__`` 在 ``stream=True`` 时返回的就是一个
-    **未被迭代**的异步生成器（``model/_base.py:254-290``），
+    **未被迭代**的异步生成器（``agentscope/model/_base.py:254-290``），
     而 ``execute_chain`` 是 ``return await current_model(...)``
-    （``agent/_agent.py:3339-3343``）—— 也就是说，
+    （``agentscope/agent/_agent.py:3339-3343``）—— 也就是说，
     ``await`` 它只负责**建出**生成器，一点 I/O 都不做。
 
     Args:
@@ -470,7 +470,7 @@ def test_a_failed_stream_is_recorded_as_a_failure() -> None:
     背景：流式（``stream=True``）是本项目的生产默认。在这个形状下，
     「调用」与「拿到结果」是两次操作 —— ``await next_handler(...)``
     只是**建出**一个异步生成器（不做 I/O），真正的网络请求发生在框架
-    迭代它的时候（``agent/_agent.py:1744-1757``）。所以
+    迭代它的时候（``agentscope/agent/_agent.py:1744-1757``）。所以
     「``await`` 没抛异常」**不等于**「模型调用成功」：
     上游挂掉、超时、鉴权失败全都发生在中间件 ``try`` 块**之外**。
 
@@ -650,7 +650,7 @@ class _HangingHandler:
 class _CancellationSwallowingHandler:
     """被取消时**返回一个正常响应**的替身 —— 复刻框架自己的行为。
 
-    ⚠️ 框架的模型层就是这么写的（``model/_base.py:224-230``：捕
+    ⚠️ 框架的模型层就是这么写的（``agentscope/model/_base.py:219-224``：捕
     ``CancelledError`` 并返回一个 ``finished_reason=INTERRUPTED`` 的响应）。
     用它来区分「靠取消传播判定超时」（``wait_for``，会被骗过）与
     「按时钟判定」（本实现，不依赖下层行为）。
@@ -950,8 +950,8 @@ def test_a_swallowed_cancellation_still_counts_as_a_timeout() -> None:
     ``asyncio.wait_for`` 写就必然踩中」的陷阱：
 
     框架的模型层**故意**吞掉 ``CancelledError``（把它转成一次优雅的
-    「被打断」—— 非流式在 ``model/_base.py:224-230`` 返回一个
-    ``INTERRUPTED`` 空响应，流式在 ``:255-270`` 转成末尾分片）。
+    「被打断」—— 非流式在 ``agentscope/model/_base.py:219-224`` 返回一个
+    ``INTERRUPTED`` 空响应，流式在 ``:283-288`` 转成末尾分片）。
     而 ``wait_for`` 判定超时的唯一依据就是「取消有没有传播出来」——
     被吞掉之后它看到的是「正常返回」，超时**永远不成立**：
     护栏写在代码里，一次都不会触发。
@@ -972,7 +972,7 @@ def test_a_hung_stream_between_chunks_fails_within_the_budget() -> None:
     """★★★ 流式响应在**分片之间**卡住时，同样要在预算内失败。
 
     ⚠️ 流式是本项目的生产默认，而它的全部 I/O 都在**迭代**里发生：
-    ``await next_handler(...)`` 只是建出生成器（框架 ``model/_base.py:254-290``），
+    ``await next_handler(...)`` 只是建出生成器（框架 ``agentscope/model/_base.py:254-290``），
     所以「建流没抛异常」什么都不能说明。只箍建流那一步的中间件，
     对生产路径等于不存在。
     """
@@ -1098,7 +1098,7 @@ def test_one_breaker_can_serve_many_middleware_instances() -> None:
     """★★★ 一个熔断器被多个中间件共享时，失败计数**合在一起**。
 
     ⚠️ 这条是整个设计的前提：框架为**每一个 agent 装配**都调一次
-    中间件工厂（``app/_service/_chat.py:994-1000``），所以生产上必然存在
+    中间件工厂（``agentscope/app/_service/_chat.py:994-1000``），所以生产上必然存在
     很多个 ``BreakerMiddleware`` 实例。它们必须共享同一个熔断器，
     否则「用全体调用者的失败共同判断下游是否可用」这个前提就不成立了。
 
@@ -1142,7 +1142,7 @@ class _FakeModel:
     """只带 ``model`` 属性的模型替身。
 
     ⚠️ 框架真实传下来的是 ``ChatModelBase`` 实例（``.model`` 是模型名，
-    见 ``model/_base.py:93``）。这里只需要那一个属性，所以**不做**鸭子类型
+    见 ``agentscope/model/_base.py:93``）。这里只需要那一个属性，所以**不做**鸭子类型
     的完整仿真 —— 少一个属性就会让 :func:`_model_label` 退回 ``"unknown"``，
     而那样本节的断言会以「标签对不上」的形式失败，不会静默通过。
     """
@@ -1188,7 +1188,7 @@ def _tokens(direction: str, model: str = _TEST_MODEL) -> float:
 def _usage(*, input_tokens: int, output_tokens: int) -> ChatUsage:
     """造一个 ``ChatUsage``。
 
-    ⚠️ ``time`` 是 ``ChatUsage`` 的**必填字段**（``_model_usage.py:19``），
+    ⚠️ ``time`` 是 ``ChatUsage`` 的**必填字段**（``agentscope/model/_model_usage.py:19``），
     造替身时漏掉它会得到一个 ``TypeError``，而不是一个「没带耗时」的对象。
     这里给 0：本文件断言的是 token 数，耗时由中间件自己测，
     两者不是同一个数（前者来自上游，后者来自本地时钟）。

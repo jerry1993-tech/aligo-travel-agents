@@ -17,7 +17,7 @@
 # 为什么业务表要单独一个 schema（而不是和 AgentScope 的表混在 public）
 # ------------------------------------------------------------------------------
 #   AgentScope 自带的表名**极其通用**：sessions / messages / agents / credentials /
-#   schedules / teams / knowledge_bases …（见 third_party/agentscope 的
+#   schedules / teams / knowledge_bases …（见已安装 agentscope 包的
 #   app/storage/_sql/_tables.py）。我们的业务域里同样会有 sessions 概念、
 #   同样会有 credentials 概念 —— 放在同一个 schema 里，撞名是迟早的事。
 #

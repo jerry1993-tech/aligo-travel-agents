@@ -286,7 +286,7 @@ async def _run(
     Returns:
         `list[EventBase]`: 守卫发出的事件。
 
-    ⚠️ ``input_kwargs`` 的键必须与框架一致（``agent/_agent.py:942-945``
+    ⚠️ ``input_kwargs`` 的键必须与框架一致（``agentscope/agent/_agent.py:939-942``
     只放 ``inputs`` 与 ``structured_schema`` 两个）。这里保持同样的形状，
     否则「守卫读不到用户原话」这类接线错误在测试里永远不会暴露。
     """
@@ -1895,7 +1895,7 @@ def test_resume_path_synthesizes_events_with_the_reply_id() -> None:
     ⚠️ 这是**对抗性评审实测出来的**缺陷，症状极隐蔽：
 
     · 用户确认订单后，agent 继续回复 —— 这条路径**不发** ``ReplyStartEvent``
-      （``agent/_agent.py:1105-1118`` 只在「新回复」分支发它；续答走
+      （``agentscope/agent/_agent.py:1105-1118`` 只在「新回复」分支发它；续答走
       ``_handle_incoming_event``，只发工具结果事件）；
     · 于是守卫的 ``state.reply_id`` 一直是空串，剥离后合成的事件带着
       ``reply_id=''``；
@@ -2073,8 +2073,8 @@ def test_retry_is_skipped_when_structured_output_is_satisfied() -> None:
     """★ 结构化输出已满足时不许重试（否则会撞框架的反忙循环守卫）。
 
     ⚠️ 框架在「schema 已满足」的 ``Exit`` 分支**不调用模型**就能再次发出
-    ``ReplyEndEvent``（``agent/_agent.py:3554-3578``），连吞两次且中间没有进展
-    就会抛 ``RuntimeError``（``agent/_agent.py:1165-1173``）。重说也改变不了结局 ——
+    ``ReplyEndEvent``（``agentscope/agent/_agent.py:3554-3578``），连吞两次且中间没有进展
+    就会抛 ``RuntimeError``（``agentscope/agent/_agent.py:1165-1173``）。重说也改变不了结局 ——
     结构化结果已经定了。
 
     ⚠️ 当前装配下 ``main_plan`` 不带 ``structured_schema``，这条分支**不可达**；
@@ -2988,7 +2988,7 @@ def test_user_text_extraction_covers_every_input_shape(
     """★ ``inputs`` 的每一种形状都要有确定行为，且取不到时返回空串。
 
     ⚠️ **必须包含取不到的那几种**：框架传给 ``on_reply`` 的 ``inputs`` 在
-    HITL 续答等场景下压根不是 ``Msg``（``agent/_agent.py:899-906`` 的联合
+    HITL 续答等场景下压根不是 ``Msg``（``agentscope/agent/_agent.py:899-906`` 的联合
     类型里有三种事件）。若这里抛异常，守卫会在**用户确认订单之后那一轮**
     崩掉；若这里返回了别的值（比如把事件 ``str()`` 化），用户文本里就会混进
     一堆结构体文本，豁免的判据随之失真。空串是唯一的正确答案。

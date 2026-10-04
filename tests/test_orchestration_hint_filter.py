@@ -158,7 +158,7 @@ def test_multimodal_hint_list_does_not_break_the_stream() -> None:
     """★ ``hint`` 是多模态块列表时，日志取长度**不得**抛异常。
 
     ⚠️ 这条守的是一个具体的崩法：``hint`` 的类型是
-    ``str | list[TextBlock | DataBlock]``（``event/_event.py:313-314``），
+    ``str | list[TextBlock | DataBlock]``（``agentscope/event/_event.py:309-310``），
     而取长度的代码跑在**事件循环里** —— 列表形态上直接 ``len()`` 会
     ``TypeError``，把用户的这一轮回复整个打断。宁可日志里长度不准，
     也不能抛。
@@ -183,7 +183,7 @@ def test_multimodal_hint_list_does_not_break_the_stream() -> None:
 def test_hint_without_source_is_loggable() -> None:
     """★ ``source`` 为 ``None`` 时也要能写日志。
 
-    ⚠️ ``source`` 是 ``str | None``（``event/_event.py:310-311``）。
+    ⚠️ ``source`` 是 ``str | None``（``agentscope/event/_event.py:307-308``）。
     直接把它塞进 ``%s`` 会打出字面量 ``None`` —— 排查时无法区分
     「来源就是空的」与「来源是个真的叫 None 的字符串」。这条要求它
     统一成占位符。
