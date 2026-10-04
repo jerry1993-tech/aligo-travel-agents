@@ -383,3 +383,7 @@ web/                 # 前端 pnpm workspace（frontend/ 基于 examples/web_ui 
 
 - 上游博客：[阿里商旅 AliGo 多智能体实践](https://agentscope.io/blog/alibaba-business-travel/)（原文存档 `docs/博客原文-Alibaba-Business-Travel.md`）
 - 框架依赖：`agentscope==2.0.9` 与 `reme-ai==0.4.1.12`（导入名 `reme`）由 [`requirements.txt`](requirements.txt) 精确钉版，随 `pip install -r requirements.txt` 一并安装 —— 仓库里不再有 vendored 源码树，`import agentscope` 解析到当前 Python 环境的 `site-packages`
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE) 许可证（Copyright 2026 jerry1993-tech）。
