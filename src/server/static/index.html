@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<link rel="icon" type="image/svg+xml" href="/agentscope.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<!-- ⚠️ 标题是**静态**的，不随 i18n 切换（见 src/i18n/index.ts：语言由
+		     浏览器/本地存储决定，而 <title> 是构建期就烧进 index.html 的一个标签）。
+		     所以这里只写产品名，不写「首页」「对话」这类会随语言变的词 ——
+		     一个中英混杂的标签比一个固定语言的产品名更糟。
+		     上方 favicon 仍指向框架自带的 public/agentscope.svg —— 它在整个前端里
+		     只有 index.html 这一处引用，换成自有图标只需替换 public/ 下那个文件
+		     （或改这一行的 href），不必动源码。本阶段不改，是为了让「改了标题」
+		     与「换了图标」两件事各自可回滚。 -->
+		<title>AliGo 差旅助手</title>
+		<script>
+			// Applied before the first paint, so the theme never flashes.
+			const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+			const applyTheme = () =>
+				document.documentElement.classList.toggle('dark', darkQuery.matches);
+			applyTheme();
+			darkQuery.addEventListener('change', applyTheme);
+		</script>
+		<script type="module" crossorigin src="/assets/index-BKqYaQto.js"></script>
+		<link rel="stylesheet" crossorigin href="/assets/index-Br7LE26C.css">
+	</head>
+	<body>
+		<div id="root"></div>
+	</body>
+</html>

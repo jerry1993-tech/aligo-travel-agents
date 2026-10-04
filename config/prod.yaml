@@ -1,0 +1,54 @@
+# ==============================================================================
+# 文件职责：**生产环境（prod）** 的配置增量，经 `ALIGO__APP__ENV=prod` 生效。
+#
+# 上下游依赖：
+#   - 上游：`ALIGO__APP__ENV=prod` 时由 src/config/loader.py 加载。
+#   - 下游：覆盖 config/base.yaml 的同名项。
+#
+# ⚠️ 切换到生产**不是**改这一个文件就够了。下面这份清单是「切档时必须逐项复核」的：
+#   1) .env 里的 ALIGO__APP__ENV 改成 prod（它才是真正决定加载哪份 YAML 的开关）；
+#   2) .env 里的 ALIGO__MILVUS__COLLECTION 去掉 `_dev` 后缀
+#      —— 它的优先级高于本文件，不改就会把生产数据写进开发集合（.env.example §五 已警告）；
+#   3) .env 里的 ALIGO__APP__LOG_LEVEL 若不是 INFO/WARNING，会顶掉本文件的取值；
+#   4) 真实密钥就位：DASHSCOPE_API_KEY（2026-10-01 起 LLM 走百炼；
+#      否则会静默降级成 MockLLM —— 生产上表现为
+#      「助手答得很像样但全是编的」，这是最危险的一种故障）、LANGFUSE 密钥对；
+#   5) 把 db.create_tables 改为 false 并**预跑迁移**：多副本并发建表/迁移是框架
+#      明确警告过的（见 config/base.yaml 的 db.create_tables 注释）。
+# ==============================================================================
+
+app:
+  # 生产只打 INFO 及以上。**不要**在生产开 DEBUG：
+  #   · DEBUG 会把提示词、用户输入、工具入参写进日志，属数据泄漏；
+  #   · 日志量会放大一到两个数量级，`app_logs` 卷很快被吃满。
+  log_level: INFO
+
+db:
+  # 生产由 alembic 迁移建表，**不允许**应用启动时顺手建表：
+  #   1) 多副本同时启动会并发执行 DDL，可能互相冲突或产生不一致的 schema；
+  #   2) 建表语句随框架版本变化，让应用在启动时改数据库，等于把一次
+  #      「部署」变成一次不受控的「隐式迁移」——回滚应用版本并不会回滚 schema。
+  create_tables: false
+  # 生产绝对不打 SQL（会连参数值一起进日志）。
+  echo: false
+
+milvus:
+  # 生产集合名 = base.yaml 的默认值（无后缀）。
+  # ⚠️ 若 .env 里写了 ALIGO__MILVUS__COLLECTION，本行**不生效** —— 见文件头第 2 条。
+  collection: aligo_travel_policy
+
+auth:
+  # 生产必须要求身份。允许匿名等于所有人都能读写同一个租户的数据。
+  require_user_header: true
+
+observability:
+  # 生产默认**不外发** trace，与 core 档的默认一致。
+  # 要开就在部署时由编排层注入（`make up-tracing` 就是这么做的）：
+  #   ALIGO__OBSERVABILITY__TRACE_EXPORTER=otlp
+  #   ALIGO__OBSERVABILITY__OTLP_ENDPOINT=http://langfuse:3000/api/public/otel/v1/traces
+  # 不写死成 otlp 的理由见 config/base.yaml 的 observability.trace_exporter 注释
+  # —— 接收端不存在时，导出器会持续重试并把 ERROR 刷满日志。
+  trace_exporter: none
+  metrics_enabled: true
+  # 生产要把 trace 打到真实地址；这里留空表示「由编排层注入」。
+  otlp_endpoint: ""

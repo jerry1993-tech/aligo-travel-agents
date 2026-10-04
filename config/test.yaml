@@ -1,0 +1,64 @@
+# ==============================================================================
+# 文件职责：**测试环境（test）** 的配置增量，经 `ALIGO__APP__ENV=test` 生效。
+#
+# ⚠️ 先分清两个容易混淆的「测试」，以及它们与本文件的关系 —— 二者**都读本文件**：
+#   1) `make test` —— 跑 pytest。tests/conftest.py 的 `settings` 夹具调的是
+#      `load_settings("test", environ=TEST_ENVIRON, dotenv=False)`，
+#      env 传的就是 "test" ⇒ **本文件被加载**。它与之不同的只有环境变量视图：
+#      TEST_ENVIRON 把 ALIGO__DB__URL 钉成 sqlite 内存库、ALIGO__LLM__API_KEY
+#      钉成空串（强制 MockLLM），而**不读**仓库根的 .env。
+#      「不依赖 Docker」这条验收靠的是那些环境变量覆盖，不是「不读本文件」。
+#   2) 真的起一套 test 环境中间件（CI 里独立的 PostgreSQL/Redis/Milvus）。
+#      `make up` 走的始终是 .env 里的 ALIGO__APP__ENV，默认 dev。
+#
+#    （本段早先写的是「`make test` 不读本文件」—— 与 conftest.py 的调用直接矛盾，
+#      已按代码更正。这个区别有实际后果：**在本文件里设的值对 pytest 同样生效**，
+#      所以下面 ratelimit.enabled=false 那条才写得住。）
+#
+# 上下游依赖：
+#   - 上游：`ALIGO__APP__ENV=test` 时由 src/config/loader.py 加载。
+#   - 下游：覆盖 config/base.yaml 的同名项。
+#
+# 设计原则：**测试环境要「吵」**——级别压低、降级打开、数据隔离。
+# 宁可多打日志，也不要让一个失败在测试里静默通过。
+# ==============================================================================
+
+app:
+  # 只保留警告与错误。测试环境通常批量跑用例，INFO 级别的噪声会把真正的失败淹没。
+  # 需要看细节时用 `ALIGO__APP__LOG_LEVEL=DEBUG` 临时顶掉本项，而不是改本文件
+  # —— 改了会连带影响 CI 里所有人的输出。
+  log_level: WARNING
+
+llm:
+  # 测试环境**强制**零密钥降级：即使跑测试的机器上恰好有真 key，
+  # 也一律走 MockLLM。理由是测试必须**确定性且不花钱**：
+  #   · 真模型输出不可复现，断言会随机失败；
+  #   · CI 每次跑测试都产生真实调用费用，且可能触发限流。
+  # 需要针对真实模型的评测（AI Golden Dataset）走 `scripts/eval.py`，
+  # 它在显式指定 --live 时才用真模型，与本文件无关。
+  use_mock_when_no_key: true
+
+milvus:
+  # 与 dev / prod 三分，避免测试用例把开发或生产的向量数据洗掉。
+  collection: aligo_travel_policy_test
+
+ratelimit:
+  # **测试环境必须关掉限流**。理由不是「限流不好测」，恰恰相反 ——
+  # 它有一条专门的用例（tests/test_rate_limit_middleware.py）会显式打开它来测。
+  # 关掉是为了其余**所有**用例：本项目一个用例就会发几十个请求
+  # （端到端流式那条要建 SSE 长连接 + 触发 run + 拉消息），
+  # 而限流计数器在**进程内存**里、跨用例存活 —— 于是随机某个用例会因为
+  # 「前面的用例把令牌用光了」而收到 429，失败信息还与被测代码毫无关系。
+  # 这类耦合造成的偶发红灯，排查成本远高于它挡住的那点问题。
+  enabled: false
+
+db:
+  create_tables: true
+  echo: false
+
+observability:
+  # 测试环境不装配任何 trace 导出器：导出是**异步批处理**的，进程退出时
+  # 可能在后台线程里留下未发送的批次，既拖慢测试又产生一堆无意义的网络错误。
+  trace_exporter: none
+  # 指标端点保留（要测它的渲染结果），但 Prometheus 不会来抓。
+  metrics_enabled: true

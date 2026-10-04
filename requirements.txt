@@ -1,0 +1,196 @@
+# ==============================================================================
+# 文件职责：AliGo 差旅助手的**第三方依赖清单**（唯一真值）。
+#
+# 上下游依赖：
+#   - 上游：被 `Dockerfile` 的 builder 阶段以 `pip install -r /tmp/requirements.txt`
+#           安装；被本机开发环境以同一份清单安装，从而保证「本地跑得过 = 容器跑得过」。
+#   - 下游：`src/` `scripts/` `tests/` 全部代码 import 的第三方能力都出自这里。
+#
+# ------------------------------------------------------------------------------
+# 【为什么这份清单必须「显式列全」，而不能靠 pip 自动解析】
+# ------------------------------------------------------------------------------
+# Dockerfile 第 56 行用 `pip install --no-deps --no-build-isolation` 安装两个
+# **本地源码包**（third_party/agentscope 与 third_party/ReMe）：
+#     `--no-deps` 的含义是「只装这两个包本身，**不要**去解析它们的依赖」。
+# 这么做的理由见 Dockerfile 该段注释（避免解析出与本地开发环境不一致的版组合）。
+# 代价是：**这两个包在各自 pyproject.toml 里声明的依赖，pip 一个都不会装** ——
+# 少写一条，容器启动时就是一句难以归因的 `ModuleNotFoundError`。
+# 因此下面第 一、二 节的条目，是从两份 pyproject.toml 的 `dependencies` 与
+# 我们实际启用的 `optional-dependencies` 逐条誊抄而来的，**不是**凭印象写的。
+#
+# 已启用的 agentscope extras（对应下面的分节）：
+#   service        —— FastAPI 服务层（create_app 的宿主）
+#   storage-redis  —— RedisStorage / RedisMessageBus
+#   storage-sql    —— AsyncSQLAlchemyStorage（会话与消息落 PostgreSQL）
+#   vdb-milvus     —— Milvus 向量库（本项目唯一向量库，见 docker-compose.yaml 第五节）
+# 未启用的 extras 及理由：
+#   channel        —— 钉钉/飞书/Discord 适配器，本项目不接外部 IM
+#   workspace-*    —— 各云沙箱后端，本项目用 LocalWorkspaceManager
+#   models         —— gemini/ollama/xai 三家模型，本项目走 OpenAI 兼容协议（DeepSeek）
+#   tools          —— 只含 `ripgrep>=14.1,<15`，**必须排除**：它只发布了
+#                     macOS-arm64 与 manylinux_2_39 的 wheel，而本镜像基于
+#                     python:3.11-slim（Debian bookworm，glibc 2.36）⇒ 拿不到 wheel
+#                     ⇒ 回落到 Rust sdist ⇒ 构建期**必然失败**（该风险由上游 pyproject
+#                     自己的注释写明）。本项目不使用内置 Grep 工具，故不装。
+#   rag            —— 文档解析器（pdf/pptx/docx/xlsx），P4 灌知识库时再按需追加，
+#                     理由见文末「P4 追加」一节：这些库的重导入都在方法内部
+#                     （`rag/_parser/_pdf.py:66` 等），不装也不影响 import。
+#   tui / a2a / realtime / memory-mem0 —— 本项目用不到
+#
+# ------------------------------------------------------------------------------
+# 【关于版本钉法】
+# ------------------------------------------------------------------------------
+# 一律用 `==` **精确钉死**到本机已装、且已被实际跑通的版本（取证命令：`pip list`）。
+# 不用 `>=`：本项目已多次踩到「上游同名不同码」的坑（见 README「三条硬性约定」），
+# 浮动版本会让「本地绿、容器红」这类问题无法复现。改版本请连同本文件上方的
+# 分节注释一起复核。
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 一、AgentScope 运行时依赖（誊自 third_party/agentscope/pyproject.toml 的 dependencies）
+# ------------------------------------------------------------------------------
+# ⚠️ 一个都不能少：Dockerfile 用 --no-deps 装 agentscope 本体，这里漏一条就等于
+#    容器里少了那条依赖。
+aioitertools==0.13.0            # 异步迭代工具（框架内部对 async generator 做 tee/zip）
+anthropic==1.8.0                # Anthropic 模型客户端（框架 Model 层统一抽象的一部分）
+dashscope==1.27.6               # 阿里云百炼 SDK：本项目 Embedding 三合一里的 DashScope 通道
+docstring_parser==0.18.0        # 解析函数 docstring 生成工具 schema（FunctionTool 依赖）
+filetype==1.2.0                 # 按魔数嗅探文件类型（上传文档分派解析器用）
+json5==0.15.0                   # 宽松 JSON 解析（模型输出的容错读取）
+json_repair==0.63.5             # 修复模型返回的残缺 JSON
+mcp==1.30.0                     # Model Context Protocol 客户端（agentscope.mcp 基于它）
+httpx==0.28.1                   # 异步 HTTP 客户端（所有模型 SDK 的传输层）
+numpy==2.4.6                    # 向量与数值计算（Embedding/检索链路）
+openai==3.19.0                  # OpenAI 兼容协议客户端 —— DeepSeek 走的就是这条协议
+python-datauri==3.0.2           # data: URI 编解码（多模态内容块）
+opentelemetry-api==1.44.0       # OTel 埋点 API（TracingMiddleware 依赖）
+opentelemetry-sdk==1.44.0       # OTel SDK：**我们必须自己装配 TracerProvider**，见 src/observability/tracing.py
+opentelemetry-exporter-otlp==1.44.0  # OTLP 导出器（把 trace 发往 Langfuse）
+opentelemetry-semantic-conventions==0.65b0  # 语义约定常量（span 属性命名）
+python-socketio==5.17.0         # WebSocket 传输（服务层实时通道）
+rich==15.0.0                    # 终端富文本渲染（框架日志与 CLI 输出）
+shortuuid==1.0.13               # 短 UUID（框架生成各类资源 id）
+python-frontmatter==1.3.0       # YAML frontmatter 解析（技能/SKILL.md 元数据）
+jinja2==3.1.6                   # 模板引擎（子智能体 system_prompt_template 渲染）
+aiofiles==25.1.0                # 异步文件 IO
+tree-sitter==0.26.0             # 增量语法解析（框架内置代码相关工具）
+tree-sitter-bash==0.25.1        # bash 语法规则
+jsonschema==4.26.0              # JSON Schema 校验（工具入参校验）
+pypdf==6.19.0                   # PDF 文本抽取（graph 内 PDFParser 的**惰性**依赖，先装上备用）
+tzdata==2026.4                  # IANA 时区库：slim 镜像与 Windows 上**不预装**，缺它 Asia/Shanghai 解析失败
+
+
+# ------------------------------------------------------------------------------
+# 二、ReMe 运行时依赖（誊自 third_party/ReMe/pyproject.toml 的 dependencies）
+# ------------------------------------------------------------------------------
+# ReMe 是**可选**的长期记忆库（甲方决策：自研画像为主，ReMe 作默认关闭的开关）。
+# 即便如此它的依赖也要装全：`agentscope.middleware.ReMeMiddleware` 一旦被 import
+# 就会拉起 reme，缺依赖会以 ModuleNotFoundError 直接炸掉整个中间件装配。
+# ⚠️ 其 `core` extra 里的 faiss-cpu / neo4j / jieba / zvec / claude-agent-sdk 等
+#    **不需要**：它们不在 base dependencies 里，且本项目不用那些后端。
+croniter==6.2.4                 # cron 表达式解析（记忆的定时整理）
+# ⚠️ fastmcp **必须停在 3.x，绝不能升到 4.x** —— 这是本文件里唯一一处「版本被上游依赖
+#    反向钉死」的地方，把原因写清楚，免得后人顺手升级后又踩一次：
+#      · fastmcp 4.0.x 的元包**无条件**依赖 `fastmcp-slim[client,server]==4.0.x`，
+#        而该 slim 包在 client / server 两个 extra 上都要求 `mcp>=2.0.0,<3.0.0`；
+#      · 但 agentscope（`third_party/agentscope/pyproject.toml:29`）要求 `mcp<2.0.0`，
+#        本文件第 62 行据此钉了 `mcp==1.30.0`。
+#      ⇒ 4.x 与 agentscope 的要求**在区间上不可能同时满足**：Dockerfile 第 48 行是
+#        一次 `pip install -r` 整体求解，于是直接以 ResolutionImpossible 失败
+#        （2026-09-24 `make up` 实测报错原文：
+#         "Cannot install fastmcp-slim[client,server]==4.0.5 and mcp==1.30.0 ..."）。
+#      · 而 fastmcp 3.4.x 的 slim 包要求 `mcp<2.0,>=1.24.0` —— 与 agentscope 的要求
+#        **区间相容**，`mcp==1.30.0` 同时落在两者之内，冲突就此消解。
+#      · ReMe 自己声明的是 `fastmcp>=3.1.0`（`third_party/ReMe/pyproject.toml:27`），
+#        3.4.7 满足；且 ReMe 对 fastmcp 的 import **全部写在函数体内的惰性 import**
+#        （`grep -rn 'from fastmcp' third_party/ReMe/reme/` 可见），`import reme` 本身
+#        根本不触碰 fastmcp，所以降这一档不会让「默认关闭的 ReMe 开关」变成坏开关。
+#    已验证（2026-10-01，非推断）：容器内 `mcp==1.30.0 + fastmcp==3.4.7` 下，ReMe 实际
+#    用到的 13 个 fastmcp 符号（FastMCP / Client / ToolError / FunctionTool / Transport /
+#    combine_lifespans / SSETransport / StdioTransport / StreamableHttpTransport /
+#    CallToolResult 等）**逐个 import 成功，13/13 通过**；且全量
+#    `pip install --dry-run --ignore-installed -r requirements.txt` 求解通过（rc=0）。
+fastmcp==3.4.7                  # ReMe 以 MCP server 形式暴露能力（**不可升 4.x**，原因见上）
+socksio==1.0.0                  # httpx[socks] 的 SOCKS 代理支持（上游写的是 httpx[socks]）
+loguru==0.7.3                   # ReMe 的日志实现
+mistletoe==1.6.0                # Markdown 解析（ReMe 的「Memory as File」要读 Markdown）
+psutil==7.2.2                   # 进程与系统信息采集
+pydantic==2.13.5                # 数据校验（本项目配置层同样依赖）
+pyyaml==6.0.3                   # YAML 解析 —— src/config/loader.py 直接使用
+watchfiles==1.3.0               # 文件变更监听（记忆目录热更新）
+zstandard==0.25.0               # zstd 压缩（记忆快照）
+
+
+# ------------------------------------------------------------------------------
+# 三、AgentScope `service` extra：FastAPI 服务层
+# ------------------------------------------------------------------------------
+fastapi==0.141.1                # Web 框架；create_app 返回的就是 FastAPI 实例
+uvicorn==0.53.0                 # ASGI 服务器：容器 CMD 直接以它拉起 src.server.app:app
+apscheduler==3.11.3             # 调度器（会话定时任务；多 worker 下会重复触发，故 WORKERS=1）
+
+
+# ------------------------------------------------------------------------------
+# 四、AgentScope `storage-redis` + `storage-sql` extra：持久化
+# ------------------------------------------------------------------------------
+redis==8.1.0                    # 业务 Redis 客户端（RedisStorage 与 RedisMessageBus）
+SQLAlchemy==2.0.54              # ORM/Core；AsyncSQLAlchemyStorage 与我们的业务库都用它
+alembic==1.20.0                 # 迁移工具。⚠️ 框架的 auto_migrate 恒为 False（多副本下不安全），
+                                #    故 AgentScope 侧靠 create_tables 建表，业务侧靠本工具
+asyncpg==0.31.0                 # PostgreSQL 异步驱动（生产用）
+aiosqlite==0.22.1               # SQLite 异步驱动（**测试用**：make test 不依赖 Docker）
+greenlet==3.5.6                 # SQLAlchemy 异步模式的必需底座（缺它 sync-over-async 直接报错）
+
+
+# ------------------------------------------------------------------------------
+# 五、AgentScope `vdb-milvus` extra：向量库
+# ------------------------------------------------------------------------------
+# 本项目唯一向量库（甲方拍板：不提供 pgvector 备选）。
+# ⚠️ 不装 milvus-lite：它只在「本地 .db 文件」模式下需要，而我们的
+#    MilvusLiteStore 连的是 compose 里的远端 Milvus（http://milvus:19530），
+#    判定见 third_party/agentscope/src/agentscope/rag/_vdb/_milvus_lite.py 的 _is_local_db_uri()。
+pymilvus==3.0.2                 # 与 docker-compose.yaml 里 milvusdb/milvus:v3.0.2 **同代**
+
+
+# ------------------------------------------------------------------------------
+# 六、本项目自身新增的依赖（不属于上面两个框架）
+# ------------------------------------------------------------------------------
+prometheus-client==0.26.0       # /metrics 端点的指标注册与渲染
+PyJWT==2.14.0                   # 可选 JWT Bearer 鉴权（config: auth.jwt_enabled）
+python-multipart==0.0.32        # FastAPI 解析 multipart/form-data（知识库文档上传）
+orjson==3.12.0                  # 高性能 JSON 序列化（服务层大批量响应）
+python-dotenv==1.2.3            # 读仓库根 .env，供**非容器**环境（本机 pytest / 脚本）
+                                # 拿到 POSTGRES_*、OPENAI_* 等非 ALIGO__ 前缀的变量，
+                                # 从而与容器行为一致。容器里没有 .env（被 .dockerignore 排除），
+                                # 该依赖在那里是一个空操作。见 src/config/loader.py::_load_dotenv_values
+
+
+# ------------------------------------------------------------------------------
+# 七、测试与质量
+# ------------------------------------------------------------------------------
+pytest==9.1.1                   # 测试框架
+pytest-asyncio==1.4.0           # 异步用例支持；**必须配合 pytest.ini 的 asyncio_mode=auto**
+anyio==4.15.1                   # 异步后端抽象（httpx / starlette TestClient 都依赖它）
+
+
+# ------------------------------------------------------------------------------
+# 八、P4 追加（灌知识库与混合检索时再解开；现在保持注释，避免无谓地拖慢镜像构建）
+# ------------------------------------------------------------------------------
+# 依据与代价：本机实测容器内 pip 下载速率仅 180–240 kB/s，每多一个几十 MB 的包，
+# `make up` 的首次构建就要多等数分钟。这些包的重导入全部在方法体内部，不装也不影响
+# `import agentscope.rag`，故推迟到真正需要它们的那一阶段。
+#
+# 文档解析器（对应 agentscope 的 `rag` extra，按需取用）：
+# python-docx                     # Word：差旅政策最可能的上传格式
+# openpyxl                        # Excel：费用标准表
+# pandas                          # ExcelParser 的默认读取路径（rag/_parser/_excel.py:63）
+# python-pptx                     # PPT：培训材料（优先级最低）
+# xlrd                            # 旧版 .xls（优先级最低）
+#
+# 检索增强：
+# rank-bm25                       # BM25 关键词检索 —— 与 Milvus 向量检索组成混合召回
+# jieba                           # 中文分词（BM25 需要；英文场景可省）
+#
+# 本地向量模型（甲方选定 ONNX 路线，**刻意不引入 torch**：torch 会让镜像膨胀数 GB）：
+# onnxruntime                     # ONNX 推理后端
+# fastembed                       # 基于 onnxruntime 的轻量 embedding，首次使用时才下载模型

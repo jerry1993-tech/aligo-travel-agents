@@ -1,0 +1,72 @@
+# ==============================================================================
+# 文件职责：Grafana 的**面板来源**自动配置（dashboard provider）。
+#
+# 它自己不定义任何面板，只回答一个问题：
+#   「去哪里找面板 JSON，找到之后放到 Grafana 的哪个目录下？」
+#
+# 挂载方式：./scripts/grafana/provisioning → /etc/grafana/provisioning（只读）
+#           （见 docker-compose.yaml 的 grafana.volumes）
+# ==============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: aligo
+    # 面板在 Grafana 里的归属目录（左侧导航里的那一层）。
+    # Grafana 会自动创建它 —— 不需要手工建文件夹，也不会因为文件夹不存在而跳过。
+    folder: AliGo
+
+    # 面板 JSON 的存放位置（**容器内**的路径）。
+    # 注意这是 compose 挂载进来的目录：./scripts/grafana/provisioning/dashboards
+    #   → /etc/grafana/provisioning/dashboards
+    # 因此仓库里 scripts/grafana/provisioning/dashboards/*.json 会被自动加载。
+    type: file
+
+    # 允许在 Grafana 界面上修改这些面板。
+    #
+    # ⚠️ 这里设 true 是一个**有意的取舍**，不是偷懒：
+    #    设 false 时，界面上会禁止保存 —— 开发期想「临时调一下查询看看效果」
+    #    都做不到，只能改 JSON、重启 Grafana，反馈回路长得让人放弃调试。
+    #    代价是：界面上的改动**不会**写回仓库里的 JSON，下次重启会被覆盖掉
+    #    （因为下面的 allowUiUpdates 只影响能否保存，不影响 provisioned 面板
+    #    在启动时按 JSON 重建）。
+    #    约定：**在界面上调好的查询，要手工搬回 JSON 并提交**，
+    #    否则它只活到下一次 `make up-obs`。
+    allowUiUpdates: true
+
+    # 扫描间隔。设成 10s 之后，改完 JSON 不必重启 Grafana ——
+    # 十秒内它会自己发现文件变了并重新加载（这是 provisioned 面板唯一的
+    # 「热更新」途径；界面上是改不动的）。
+    updateIntervalSeconds: 10
+
+    options:
+      # 相对**容器内**的 Grafana 根目录（/etc/grafana）还是绝对路径？
+      # path 写成绝对路径，避免依赖对「相对谁」的猜测。
+      path: /etc/grafana/provisioning/dashboards
+
+      # 递归扫描子目录。
+      # ⚠️ 保持 true 有一个实际好处：将来按主题拆成
+      #    dashboards/http/、dashboards/agent/ 时，不必回来改这里。
+      foldersFromFilesStructure: false
+
+# ==============================================================================
+# ⚠️ 关于启动日志里的两条 ERROR（这是**预期**的，不是配置坏了）
+# ==============================================================================
+#   Grafana 启动时会无条件去读 provisioning 下的四个子目录：
+#   datasources / dashboards / plugins / alerting。
+#   本项目只用前两个，因此每次启动都会看到：
+#
+#     level=error msg="Failed to read plugin provisioning files from directory"
+#           path=/etc/grafana/provisioning/plugins error="... no such file or directory"
+#     level=error msg="can't read alerting provisioning files from directory"
+#           path=/etc/grafana/provisioning/alerting error="... no such file or directory"
+#
+#   已实测确认：这两条**不影响任何功能** —— 数据源与面板都会被正常加载
+#   （可用 `curl -u admin:*** localhost:3000/api/search?query=AliGo` 验证，
+#   面板会出现在 AliGo 目录下）。Grafana 把它们记成 error 级别只是因为
+#   它把「目录不存在」与「目录里的文件读不了」用了同一条日志路径。
+#
+#   刻意**不**去补两个空目录来消除这两行：git 不跟踪空目录，
+#   靠 .gitkeep 占位只会给每个 clone 的人多两个看不懂的空文件夹，
+#   而换来的仅仅是日志里少两行。看到它们时知道「这是正常的」就够了。
+

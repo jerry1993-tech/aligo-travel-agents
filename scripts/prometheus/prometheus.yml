@@ -1,0 +1,122 @@
+# ==============================================================================
+# 文件职责：Prometheus 的抓取配置。**本文件是抓取目标的唯一真值** ——
+#           docker-compose.yaml 的 prometheus 服务把地址写在这里，而不是反过来。
+#
+# 挂载方式：./scripts/prometheus/prometheus.yml → /etc/prometheus/prometheus.yml（只读）
+#           （见 docker-compose.yaml 的 prometheus.volumes）
+#
+# 生效档位：observability（`make up-obs`）及以上。core 档（`make up`）不启动
+#           Prometheus，因此本文件在那时不会被读取 —— 改它不会影响 core 档。
+#
+# ⚠️ 本文件被 `promtool check config` 校验（见 compose 里 prometheus 的 healthcheck）。
+#    语法错误会让容器永久 unhealthy，`make up-obs` 的 --wait 只能干等到超时。
+#    改完请本地跑一次：
+#        docker run --rm -v "$PWD/scripts/prometheus:/cfg" \
+#          prom/prometheus:v2.53.0 promtool check config /cfg/prometheus.yml
+# ==============================================================================
+
+# 全局默认值：所有 job 未显式覆盖时按这里来。
+global:
+  # 抓取间隔。**必须与 config/base.yaml 的 observability.metrics_interval_seconds
+  # 保持一致（15s）** —— 那个配置项在应用侧其实没有消费点（/metrics 是每次抓取
+  # 时实时渲染的，不存在「按间隔采样」的采集循环）。两处写同一个数字，
+  # 只为人工核对时不必怀疑「到底哪个才是真的」。
+  scrape_interval: 15s
+  # 单次抓取的超时。必须**小于** scrape_interval，否则一次慢抓取会与下一次重叠，
+  # Prometheus 会打出 "scrape timeout exceeded" 并开始丢样本。
+  # 15s 间隔 / 10s 超时留了 5s 余量：应用的 /metrics 是内存渲染，正常在毫秒级。
+  scrape_timeout: 10s
+  # 评估告警规则的间隔（本项目 P1 未定义告警规则，保留默认值即可）。
+  evaluation_interval: 15s
+
+  # 给所有抓到的样本附加的外部标签。
+  # ⚠️ 只在**多套环境共用一个 Prometheus** 时才需要区分；本项目每套 compose
+  #    栈自带一个 Prometheus，因此这里留空 —— 加一个写死的 env="dev" 反而会在
+  #    生产栈里留下错误标签（配置是从开发机复制过去的）。
+  external_labels: {}
+
+# ==============================================================================
+# 抓取目标
+# ==============================================================================
+scrape_configs:
+  # ----------------------------------------------------------------------------
+  # 一、AliGo 应用本身
+  # ----------------------------------------------------------------------------
+  # 为什么不写 localhost:8000：Prometheus 与 app 是**两个容器**，
+  # 各自有独立的网络命名空间。localhost 在 Prometheus 容器里指的是它自己，
+  # 抓到的会是一堆 404（或连接被拒），而 target 列表上只显示 down ——
+  # 看不出「其实找错了地址」。这里必须用 compose 的服务名 `app`。
+  #
+  # 端口 8000 是容器内端口，与宿主机映射（8000:8000）无关。
+  - job_name: aligo-app
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:8000"]
+        labels:
+          # 用于在 Grafana 面板里区分「应用自身」与「Prometheus 自身」的指标。
+          # 这不是冗余：Prometheus 也会抓自己（见下面的 job），
+          # 两边的指标名有重叠（如 up、scrape_duration_seconds），
+          # 没有这个标签时面板上的曲线会混在一起。
+          component: aligo-app
+
+  # ----------------------------------------------------------------------------
+  # 二、Prometheus 自身
+  # ----------------------------------------------------------------------------
+  # 抓自己是为了让 Grafana 能回答「是应用出问题了，还是采集链路出问题了」。
+  # 没有它时，一次「面板全空」的排查会完全没有着力点：
+  # 应用侧的 /metrics 明明能 curl 通，但面板就是不更新 —— 到底是应用没暴露，
+  # 还是 Prometheus 抓取失败、磁盘写满、被限流？这个 job 给出答案。
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          component: prometheus
+
+  # ----------------------------------------------------------------------------
+  # 三、Milvus 向量库
+  # ----------------------------------------------------------------------------
+  # 端口 9091 是 Milvus 的**指标/健康**端口（两个用途共用一个端口）：
+  #   · /healthz —— compose 里 milvus 的 healthcheck 探的就是它；
+  #   · /metrics —— Prometheus 文本格式，本 job 抓的就是它。
+  #
+  # 为什么敢写 `milvus:9091`（而不是像某些注释怀疑的那样「根本没暴露」）：
+  #   docker-compose.yaml 的 milvus 服务**确实**写了 `ports: ["9091:9091"]`，
+  #   且 Milvus 属于 core 档、本 Prometheus 属于 observability 档，而
+  #   `make up-obs` 是 **core + observability 同起**（见 Makefile）——
+  #   因此正常编排下这个 target 真的在线，不是一个永远 down 的地址。
+  #   ⚠️ 这里用**服务名 + 容器内端口**，与上面 aligo-app 用 `app:8000` 同理；
+  #      **不要**写 localhost（那会指向 Prometheus 容器自己，抓到的全是自己的东西）。
+  #   注：`ports` 把 9091 映射到宿主机只是顺带方便本机 curl 排障，抓取本身
+  #   走的是容器网络，**不依赖**这条映射 —— 只要两个容器在同一网络即可。
+  #
+  # 档位前提（关系到「target 显示 down 时怎么判断」）：若只单独起 observability
+  #   档而没起 core 档，milvus 容器不存在，本 target 必然是 down —— 那是
+  #   「依赖档没起」，不是配置写错。
+  - job_name: milvus
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["milvus:9091"]
+        labels:
+          # 与 aligo-app / prometheus 一样给出 component 标签：
+          # 面板里按它区分「向量库的曲线」与「应用自身的曲线」。
+          component: milvus
+
+# ==============================================================================
+# ⚠️ 已知的覆盖缺口（写在这里，以免被当成「已经接好了」）
+# ==============================================================================
+# 1) ~~**Milvus 的指标没有被抓取**~~ → **已补齐**（见上面的 job `milvus`）。
+#    覆盖前核对过 docker-compose.yaml：milvus 服务发布了 `9091:9091`，
+#    且该端口同时承载 /healthz 与 /metrics，故 `milvus:9091` 是一个真实可达的目标。
+#    现在能收到「向量检索延迟、集合规模、查询 QPS」这类数据。
+#
+# 2) **Redis / PostgreSQL 的指标没有被抓取**。
+#    它们各自需要额外的 exporter 容器（redis_exporter / postgres_exporter），
+#    那会再多两个常驻进程与约 100 MB 内存。当前 compose 的 observability 档
+#    已经到 6 个容器，加这两个对一台 16 GB 的开发机不划算。
+#    P5 做压测时若有明确的「连接池是否打满」这类问题，再加不迟。
+#
+# 3) **没有告警规则**（本文件没有 rule_files 段）。
+#    P1 的目标是「能看见」，不是「能告警」。真要接告警时，
+#    最该先加的两条是：aligo_ready == 0 持续 2 分钟、以及
+#    aligo_model_breaker_state == 2（熔断开路）—— 前者说明实例不该接流量，
+#    后者说明下游模型正在持续失败。

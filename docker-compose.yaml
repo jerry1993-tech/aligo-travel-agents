@@ -1,0 +1,892 @@
+# ==============================================================================
+# 文件职责：AliGo 差旅助手全栈中间件的**一键编排**定义。
+#           负责拉起业务库、缓存、向量库及其依赖、可观测栈与（可选的）MaxKB，
+#           并把本项目应用（app）接入同一网络。
+#
+# 上下游依赖：
+#   - 上游：读取根目录 `.env`（由 `.env.example` 复制而来）完成密钥与端口注入；
+#           由 `Makefile` 的 `make up / down / logs / smoke` 驱动。
+#   - 下游：`app` 服务使用根目录 `Dockerfile` 构建，容器内通过 **服务名** 做 DNS 解析
+#           访问 `postgres` / `redis` / `milvus` / `langfuse` / `minio`。
+#
+# ------------------------------------------------------------------------------
+# 【重要】本机资源现状与 profile 分组策略（甲方 2026-09-23 拍板 N3(b)）
+# ------------------------------------------------------------------------------
+# 实测本机 Docker VM 只分配到 **3.82 GiB 内存 / 4 CPU**（宿主机 8 GiB）。
+# 「四档全开会 OOM」是 **cap 相加的纸面推算（13 服务合计 9024 MiB），从未实测到 OOM**；实测十二个约 2.4 GiB 无碍。故仍分四档：
+#
+#   core          默认档。业务主链路必需：postgres / redis / etcd / minio / milvus / app。
+#   observability 指标档。prometheus + grafana，**必须与 core 同起**才有意义 ——
+#                 Prometheus 抓取的目标就是 core 里的 app（app:8000/metrics），
+#                 不跑 app 就只是一个抓不到东西的空壳。两者合计开销很小（实测约 0.3 GiB）。
+#   tracing       追踪档。langfuse v3（web + worker + clickhouse + 专用 redis），
+#                 是本栈**最重**的一档，明显超过 core+observability 之和。按需开启。
+#   optional      可选档。maxkb，默认不启动（甲方 #5：自研 Milvus RAG 为主）。
+#
+# 常用命令：
+#   make up           # 起 core（P1 验收用的就是这条）
+#   make up-obs       # 起 core + observability：可观测的最小完整形态
+#   make up-tracing   # 在 up-obs 基础上再加 langfuse（内存最紧张的一档）
+#   docker compose --profile optional up -d maxkb
+#
+# ⚠️ 关于内存：下面的 memory 是**单容器上限（cap）而非预留**。各 cap 相加会大于 3.82 GiB，
+#    这是刻意的 —— cap 的作用是「某个容器失控时不让它吃光整机」。
+#    真正的判据是实测占用（`docker stats`），P1 阶段已用 `make up` 实测通过。
+#
+# 注：profile 决定「哪些服务参与本次操作」。⚠️ 它**不是**「只挑要启动的那几个、其余照旧可见」：
+#     只要**被选中**的某个服务 `depends_on` 指向一个**未被启用**的档，compose 会把整份项目判为非法
+#     并拒绝执行（`... depends on undefined service ...: invalid compose project`），
+#     **不会**自动把被依赖档拉起来。实测（2026-09-24）：
+#         docker compose --profile tracing config -q        → rc=15（langfuse 依赖 core 档的 postgres/minio）
+#         docker compose --profile core config -q           → rc=0 （跨档的 langfuse 根本未被选中，故无需校验）
+#         docker compose --profile core --profile observability --profile tracing config -q → rc=0
+#     所以跨档依赖必须**显式把被依赖档一并启用** —— Makefile 的 up-obs / up-tracing 正是这么写的。
+#     ⚠️ 报错文本里的「服务名」与「依赖名」都**不是稳定的**（同一命令连跑 30 次会出现
+#        langfuse/langfuse-worker × postgres/minio 四种组合），别照抄一条当规范。
+#
+# ------------------------------------------------------------------------------
+# 【重要】镜像来源：受限网络下如何换成镜像站（甲方 D8）
+# ------------------------------------------------------------------------------
+# 本文件的 `image:` 分两类，**处置方式不同，不要一刀切**：
+#
+#   1) **Docker Hub 托管**（postgres / redis / milvus / langfuse / langfuse-worker /
+#      clickhouse / prometheus / grafana / maxkb）——统一写成
+#      `${ALIGO__IMAGE_REGISTRY:-}<规范名>`。
+#      变量为空 ⇒ 取规范名（直连 Docker Hub）；填镜像站前缀 ⇒ 整体改走该站。
+#      例：**命令行**写 `ALIGO__IMAGE_REGISTRY=docker.m.daocloud.io/ make up`（⚠️ **不可写进 `.env`**：
+#          它会被注入 app 容器、撞上 loader 的未知键校验而崩溃重启）则上面 9 个镜像全部变成 `docker.m.daocloud.io/...`，**不需要** `docker tag`。
+#      为什么用「一个前缀变量」而不是「每个镜像一个变量」：单一真值，不会出现
+#      「改了三个、漏了一个」那种只在拉取时才暴露的残缺状态。个别镜像你的镜像站确实
+#      没有时，用标准的 `docker-compose.override.yaml` 单独覆盖那一个服务即可。
+#
+#   2) **quay.io 托管**（etcd / minio）——保持裸名，**不要**加前缀。
+#      原因：这两个与 Docker Hub 无关，且实测本机到 quay.io **始终可达**；
+#      给它们套 Hub 镜像站前缀反而会把本来能拉的镜像改坏。
+#
+# ⚠️ 两个必须知道的坑（都是本机实测，不是推测）：
+#   · **守护进程级镜像加速（`~/.docker/daemon.json` 的 `registry-mirrors`）在本机无效**。
+#     `docker info` 会把它列出来、看起来已生效，但拉取规范名时依旧走
+#     `registry-1.docker.io` 而失败。**必须用上面的显式前缀名**，别指望加速器。
+#   · `aligo-travel-app:local` 是**本地构建**的镜像，不带任何前缀，也不受本变量影响。
+#
+# 下游影响：改本变量后请跑 `make pull` 预拉一遍再 `make up`，便于把「拉不动」与
+#           「起不来」两类问题分开定位。
+# ==============================================================================
+
+name: aligo-travel            # 项目名：决定网络名、卷名前缀与 compose 自身的资源归属标记。
+                              # ⚠️ 它**不决定容器名** —— 本文件每个服务都写了 container_name，
+                              #    容器名以那个为准（aligo-app / aligo-langfuse / …，无 aligo-travel- 前缀）。
+                              #    实测：`docker ps` 里没有任何一个容器名带 `aligo-travel-`。
+
+# ------------------------------------------------------------------------------
+# 公共构建片段：app 服务复用，避免重复书写。
+# ------------------------------------------------------------------------------
+x-app-common: &app-common
+  build:
+    context: .                # 构建上下文为仓库根目录：需要 requirements.txt 与 third_party/
+                              # （后者是 agentscope / ReMe 的**安装源码**，构建期才被 pip install）
+    dockerfile: Dockerfile
+    args:
+      # 容器内 pip 源。本机实测 pypi.org 与阿里云源均可达，保留阿里云为保守默认。
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+      # 备用源：**不是可选优化，是正确性保障**。阿里云镜像的索引页 gzip 缓存会陈旧，
+      # 使「新发布不久的版本」对 pip 不可见（pip 总是请求 gzip），而 curl/浏览器
+      # 因不带 Accept-Encoding 反而不受影响 —— 极易误判成「版本号钉错」。
+      # 完整实测数据与复现方法见 Dockerfile 顶部的 pip 源说明段。
+      PIP_EXTRA_INDEX_URL: https://pypi.org/simple/
+  env_file:
+    - .env                    # 注入全部密钥与业务配置（该文件不入库）
+  restart: unless-stopped
+  networks: [aligo-net]
+
+# ------------------------------------------------------------------------------
+# 公共环境片段：Langfuse v3 的 web 与 worker **必须逐字一致** 的那一组变量。
+# ------------------------------------------------------------------------------
+# 为什么用 YAML 锚点（`<<: *langfuse-env`）而不是在两个服务里各写一遍：
+# 这两个容器共用同一份 Langfuse 后端配置 —— 元数据库、ClickHouse、Redis、S3、
+# 三个服务端密钥。任何一项不一致都会产生**极难定位**的症状，例如 worker 连错
+# Redis 会表现为「界面里看得到 trace，但异步评测/评分永远不完成」，而两个容器的
+# 日志本身都完全正常。锚点让「不一致」在源码层面就不可能发生。
+#
+# 注意：LANGFUSE_INIT_* 那组**只属于 web**（首启建组织/项目/账号），故不放在本锚点里，
+# 而是写在下方的 langfuse-web 服务上 —— 与 Langfuse 官方 compose 的划分一致。
+x-langfuse-env: &langfuse-env
+  # ---- 元数据库：langfuse 专用角色 + 专用 database（由 postgres 首启脚本创建）----
+  # ⚠️ 用户名必须写死 `langfuse`，不可写成 ${POSTGRES_USER}：那会拿超级用户名去配
+  #    langfuse 的密码，必然认证失败（FATAL: password authentication failed）。
+  DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@postgres:5432/langfuse
+  # ---- 队列与缓存：走**专用** Redis 实例，不复用业务 Redis（理由见 langfuse-redis）----
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+  REDIS_TLS_ENABLED: "false"
+  # ---- 分析库：ClickHouse。v3 起是**必需**组件（v2 没有它，这正是 v2/v3 的分水岭）----
+  CLICKHOUSE_URL: http://clickhouse:8123            # HTTP 端口，应用读写走这个
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000   # 原生协议端口，仅建表迁移用
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"   # 单机部署必须关：开着会让迁移去找并不存在的集群
+  # ---- 事件对象存储：复用本栈已有的 MinIO，桶名固定 `langfuse`（由 minio 服务启动时建）----
+  # Langfuse v3 把原始 trace 事件写进 S3 兼容存储，ClickHouse 里只留索引与聚合。
+  # 因此这个桶**不是可选项**：缺了它 ingest 会失败，而界面上只表现为「数据不出现」。
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1        # MinIO 不校验区域，但 S3 SDK 必填
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true" # MinIO 只认 path-style，必须开
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  # 媒体上传（多模态附件）走同一个桶的另一个前缀。默认关闭，这里配齐是为了
+  # 万一在 UI 里开启该功能时不至于静默失败。
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  # ---- 服务端密钥：会话签名 / API Key 哈希 / 敏感字段对称加密 ----
+  NEXTAUTH_URL: http://localhost:3001   # 浏览器访问地址，用于生成回调与页面链接
+  NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+  SALT: ${SALT}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: "false"            # 关闭匿名遥测，避免外发数据
+  TZ: Asia/Shanghai
+
+services:
+
+  # ⚠️ 重启策略（**每一个**服务都写了 `restart: unless-stopped`，不是遗漏）：
+  #    这条策略是**被真实故障逼出来的**。2026-10-03 实测：本机 Docker VM 只有
+  #    3.82 GiB / 4 CPU，跑满 tracing 档（12 容器）时 Milvus 开始丢 etcd 租约
+  #    （日志里是 `Slow etcd operation save` 8.19s → `clock offset is huge` →
+  #    `the session is expired without activing closing`），随后进程以 exit 80
+  #    / exit 134（SIGABRT）退出。而 compose 的默认重启策略是 `no` —— 于是
+  #    **一次宿主机的负载尖峰，把整个栈变成了需要人手动介入才能恢复的状态**：
+  #    后续每一次 `make smoke` 都会失败，而失败信息指向「Milvus 连不上」，
+  #    与真正的原因（宿主资源）隔着两层。
+  #
+  #    为什么是 `unless-stopped` 而不是 `always`：前者尊重 `docker stop`
+  #    （人工停掉的容器不会被自动拉起，排查时不会被反复「复活」干扰），
+  #    后者会。为什么不用 `on-failure`：健康检查失败的容器**进程还活着**，
+  #    `on-failure` 对它无能为力，而本项目所有依赖都有 healthcheck。
+  #    ⚠️ 重启**不是**诊断手段：它只保证「下游恢复后自己回来」。容器起来后
+  #    仍然 unhealthy 时，请照第八章的排障手册看日志，不要靠反复重启掩盖问题。
+  #    ⚠️ Docker 对反复重启有退避（100ms 起、逐次翻倍、上限 1 分钟），
+  #    所以配置真错时表现为日志里周期性的失败，而不是刷屏的崩溃循环。
+
+  # ============================================================================
+  # 一、PostgreSQL —— 业务库 + Langfuse 元数据库（同一实例不同 database，省内存）
+  # ============================================================================
+  postgres:
+    image: ${ALIGO__IMAGE_REGISTRY:-}postgres:16-alpine
+    container_name: aligo-postgres
+    restart: unless-stopped
+    profiles: [core]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}          # 超级用户名，首启时创建
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}  # 超级用户密码
+      POSTGRES_DB: ${POSTGRES_DB}              # 默认创建的数据库（业务库 aligo）
+      # 供首启初始化脚本读取：用它创建 langfuse 专用角色与同名数据库。
+      # lanfuse 用独立角色而非超级用户，是为了让「业务库」与「观测库」的凭据可以分别轮换。
+      LANGFUSE_DB_PASSWORD: ${LANGFUSE_DB_PASSWORD}
+      TZ: Asia/Shanghai                        # 时区：与业务侧 InjectionConfig.timezone 保持一致
+      PGDATA: /var/lib/postgresql/data/pgdata  # 数据目录下沉一层，避免与挂载点根目录冲突
+    ports:
+      - "5432:5432"                            # 宿主机 5432 → 容器 5432，便于本机用客户端直连调试
+    volumes:
+      - pg_data:/var/lib/postgresql/data                      # 数据持久化卷，删容器不丢数据
+      - ./scripts/postgres/init:/docker-entrypoint-initdb.d:ro # 首启初始化脚本（建 langfuse 库等）
+    healthcheck:
+      # pg_isready 是 Postgres 自带的轻量探活，确认实例已能接受连接
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s          # 首启初始化需要时间，期间失败不计入 retries
+    deploy:
+      resources:
+        limits:
+          memory: 512M           # 上限保护：防止异常查询把 VM 内存吃光
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 二、Redis —— 会话状态、幂等锁、SSE 事件总线（pub/sub）
+  # ============================================================================
+  redis:
+    image: ${ALIGO__IMAGE_REGISTRY:-}redis:7-alpine
+    container_name: aligo-redis
+    restart: unless-stopped
+    profiles: [core]
+    environment:
+      # ⚠️ 这个变量**必不可少**：下面的 healthcheck 用 `$$REDIS_PASSWORD`（转义后由容器内
+      #    shell 展开，好处是密码不出现在宿主机进程列表里）。但 redis 官方镜像不会自动
+      #    把 .env 的键注入容器 —— 不显式声明 environment，容器内该变量就是空的，
+      #    healthcheck 会执行 `redis-cli -a "" ping`，对已设 requirepass 的实例返回
+      #    WRONGPASS 而非 PONG，于是 redis 恒为 unhealthy，app 的
+      #    `depends_on: redis: condition: service_healthy` 永不满足，`make up` 必然失败。
+      #    （对照：postgres 的 healthcheck 用单 `$`，在宿主机解析期就替换掉了，故不需要此项。）
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      TZ: Asia/Shanghai
+    # --requirepass 开启密码；--appendonly yes 打开 AOF 持久化，容器重启后会话不丢
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"              # 宿主机 6379 → 容器 6379，便于本机 redis-cli 调试
+    volumes:
+      - redis_data:/data         # AOF 文件持久化目录
+    healthcheck:
+      # $$ 在 compose 中转义为字面 $，让密码在**容器内**展开，避免密码出现在宿主机进程列表
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 三、etcd —— Milvus 的元数据存储（Milvus standalone 的强依赖，非本项目直接用）
+  # ============================================================================
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: aligo-etcd
+    restart: unless-stopped
+    profiles: [core]
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision   # 自动压缩模式：按版本号压缩历史，防数据无限增长
+      ETCD_AUTO_COMPACTION_RETENTION: "1000" # 保留最近 1000 个版本
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296" # 后端存储配额 4GiB，超限前会告警
+      ETCD_SNAPSHOT_COUNT: "50000"           # 每 5 万次提交做一次快照
+    # 以单节点方式启动；数据目录 /etcd 由下方卷挂载持久化
+    command: ["etcd", "-advertise-client-urls=http://127.0.0.1:2379",
+              "-listen-client-urls=http://0.0.0.0:2379",
+              "--data-dir", "/etcd"]
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      # etcdctl 自带健康检查子命令；容器内 2379 为客户端端口
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 四、MinIO —— 对象存储：Milvus 的索引文件 + Langfuse 的事件对象（两个用途共用实例）
+  # ============================================================================
+  # ⚠️ 必须用 quay.io 源：MinIO 官方已下架 Docker Hub 社区镜像，docker.io/minio/minio
+  #    的 anonymous pull 返回 401（全 tag），本项目 P0 阶段已实测确认。
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: aligo-minio
+    restart: unless-stopped
+    profiles: [core]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}          # 访问密钥（access key）
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}  # 私密密钥（secret key）
+    # ------------------------------------------------------------------------
+    # 为什么这里 `entrypoint: sh` + `command: -c '...'`，而不直接写 minio 子命令
+    # ------------------------------------------------------------------------
+    # 起因：Langfuse v3 需要一个已存在的桶 `langfuse`（它**只读不建**，桶不存在时
+    # ingest 直接失败，界面上只表现为「数据不出现」）。而 MinIO 没有
+    # /docker-entrypoint-initdb.d 之类的初始化钩子 —— 本机实测确认该钩子**不会**执行
+    # （放在那儿完全没反应）。
+    #
+    # 于是改成启动前先 mkdir。⚠️ 两个本机实测踩过的坑，别改回去：
+    #   1) **不能**写成 `command: sh -c '...'`：本镜像的 ENTRYPOINT **就是** `minio` 本身，
+    #      `command` 只是它的参数，于是会报 `'sh' is not a minio sub-command` 而退出。
+    #      必须用 `entrypoint: sh` 把入口整体换掉。
+    #   2) **不需要**额外拉一个 mc 初始化容器、也不需要新镜像：本镜像自带 `mc`，
+    #      而 MinIO 的 S3 语义是「**顶层目录即桶**」，所以 `mkdir -p /data/langfuse`
+    #      等价于建桶，比走 mc 更少一层依赖。这与 Langfuse 官方 compose 的做法一致。
+    #
+    # 用 `exec` 让 minio 顶替掉 sh 的进程，保证信号（SIGTERM）能直接送达 —— 否则
+    # sh 会拦住信号，`docker stop` 要等满超时才杀掉，`make down` 会明显变慢。
+    entrypoint: sh
+    command:
+      - -c
+      - >-
+        mkdir -p /data/langfuse &&
+        exec minio server /data --console-address ":9001"
+    ports:
+      - "9000:9000"              # 宿主机 9000 → 容器 9000，MinIO S3 API 端口（Milvus 使用）
+      - "9001:9001"              # 宿主机 9001 → 容器 9001，MinIO Web 控制台，便于查看桶
+    volumes:
+      - minio_data:/data         # 对象数据持久化目录
+    healthcheck:
+      # 镜像内已确认自带 curl（P1 实测），/minio/health/live 是官方存活探针
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 五、Milvus standalone —— 本项目**唯一**向量库（甲方 #4 拍板：不提供 pgvector 备选）
+  # ============================================================================
+  milvus:
+    # 镜像版本 = v3.0.2，与 requirements.txt 里裸装的 pymilvus 3.0.2 **精确同代**
+    # （甲方 D2 拍板：升级服务端以适配 pymilvus 3.0.x，取代原 N2 的 2.4.15）。
+    # 依据：Milvus 服务端 release notes 的 SDK 对照表把 3.0.x 服务端配 Python SDK 3.0.x；
+    #      而 pymilvus 3.0.2 自带的 METADATA 兼容表止于 2.6，**是陈旧的、不是门禁**
+    #      （客户端无任何服务端版本硬校验，实测 3.0.2 客户端可正常连 2.4.15 服务端）。
+    # 拓扑未变：3.0 的 standalone 仍是 etcd + minio + milvus 三容器，端口、/healthz 探针、
+    #      卷路径、depends_on 均与 2.4 版官方 compose 一致，故**不需要重写本服务**。
+    #      但**并非"只改 tag 就万事大吉"**：官方 v3.0.x 的 compose 给本服务多了一项
+    #      MINIO_REGION（2.4 版没有），且 3.0 的 milvus.yaml 把 COMMON_STORAGETYPE 的
+    #      `minio` 标为 deprecated（建议改用 `remote`）。这两点已按下面的注释处理。
+    #      数据面：官方只保证 2.6→3.0 的兼容与回滚，**不保证 2.4→3.0**。本栈此前
+    #      集合数为 0（无任何向量数据），故采取"清卷重建"而非逐跳升级。
+    # ⚠️ 用变量 + 默认值：默认是 Docker Hub 规范名；但在 Docker Hub 不可达的环境
+    #    （本机 registry-1.docker.io 时通时断，曾出现 TCP 层阻断；2026-09-24 复测 3/3 可用）
+    #    可在 .env 里覆盖为镜像站前缀名，
+    #    否则 `make up` 会在拉取阶段失败。见本文件顶部 D8 段与 .env.example 的 ALIGO__IMAGE_REGISTRY。
+    image: ${ALIGO__IMAGE_REGISTRY:-}milvusdb/milvus:v3.0.2
+    container_name: aligo-milvus
+    restart: unless-stopped
+    profiles: [core]
+    # standalone 是单机模式；集群模式需另配 rootcoord/datacoord 等，本项目用不到
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined        # Milvus 内部使用的某些系统调用被默认 seccomp 策略拦截，需放开
+    environment:
+      ETCD_ENDPOINTS: etcd:2379         # 元数据后端：compose 服务名 etcd
+      MINIO_ADDRESS: minio:9000         # 对象存储地址：compose 服务名 minio
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_NAME: milvus         # 桶名，Milvus 启动时会自动创建
+      # MinIO 区域。**3.0 新增项**（2.4 版官方 compose 没有）：官方 v3.0.2 的
+      # deployments/docker/standalone/docker-compose.yml 里明写 MINIO_REGION: us-east-1。
+      # 本栈 MinIO 未配 region，其默认即 us-east-1，故此处取值与之一致。
+      MINIO_REGION: us-east-1
+      # ⚠️ 必须是 remote，**不能沿用 2.4 时代的 minio**：
+      #    3.0.2 镜像内的 /milvus/configs/milvus.yaml 原文写着
+      #    「available values are [local, remote], value minio is deprecated, use remote instead」。
+      #    （该结论来自对镜像内实物配置的读取，不是推测。）
+      COMMON_STORAGETYPE: remote        # 存储后端类型：对象存储走远端（MinIO/S3）
+      TZ: Asia/Shanghai
+    ports:
+      - "19530:19530"             # 宿主机 19530 → 容器 19530，Milvus gRPC 端口（pymilvus 连接用）
+      - "9091:9091"               # 宿主机 9091 → 容器 9091，指标/健康端口（Prometheus 采集与探针）
+    volumes:
+      - milvus_data:/var/lib/milvus   # Milvus 本地工作目录（元数据缓存与日志）
+    healthcheck:
+      # Milvus 自带 /healthz 端点（返回 200 视为健康），这是它的官方探针
+      test: ["CMD-SHELL", "curl -f http://localhost:9091/healthz || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 90s           # Milvus 冷启动较慢（要等 etcd/minio 就绪并加载段），给足 90s
+    depends_on:
+      etcd:
+        condition: service_healthy   # 必须等 etcd 健康后再启动，否则 Milvus 会连不上元数据而退出
+      minio:
+        condition: service_healthy   # 同理，等 MinIO 健康
+    deploy:
+      resources:
+        limits:
+          memory: 1536M           # Milvus 是本栈内存大户，显式设上限防止吃光 3.82 GiB 的 VM
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 六、app —— 本项目服务（FastAPI + AgentScope）
+  # ============================================================================
+  app:
+    <<: *app-common               # 复用上方公共片段（build / env_file / restart / networks）
+    image: aligo-travel-app:local
+    container_name: aligo-app
+    profiles: [core]
+    environment:
+      # ----------------------------------------------------------------------
+      # trace 外发开关：**由档位注入**，而不是写死在 .env 里
+      # ----------------------------------------------------------------------
+      # 为什么不直接把 otlp 写进 config/base.yaml：trace 的接收端（langfuse）只在
+      # tracing 档存在。若默认就设成 otlp，那么 `make up`（core 档）会让应用一直去
+      # 连一个解析不了的域名 `langfuse`，导出器按批重试并刷 ERROR 日志 —— 于是
+      # 「本来一切正常」的 core 档看起来像坏了，还会淹没真正的故障信息。
+      #
+      # 因此取值分两路：
+      #   · 默认（core / up-obs）：none —— 不装配导出器，零噪声，零密钥原则不受影响。
+      #   · make up-tracing：Makefile 在 compose 命令前注入这两个变量（命令行环境变量
+      #     的优先级高于 .env），于是 app 容器被重建并带上 otlp 配置。
+      # 你也可以把它们写进 .env 手工常开 —— 但那样 core 档就会开始重试，故不推荐。
+      ALIGO__OBSERVABILITY__TRACE_EXPORTER: ${ALIGO__OBSERVABILITY__TRACE_EXPORTER:-none}
+      # OTLP 接收端。Langfuse v3 的路径固定为 /api/public/otel/v1/traces（要求 >= 3.22.0）。
+      # 应用侧会自动为该端点补上 HTTP Basic 认证头（用户名/密码 = public/secret key），
+      # 见 src/observability/tracing.py；**缺密钥时会明确告警并跳过装配**，而不是静默 401。
+      ALIGO__OBSERVABILITY__OTLP_ENDPOINT: ${ALIGO__OBSERVABILITY__OTLP_ENDPOINT:-}
+    ports:
+      - "${ALIGO__APP__PORT:-8000}:8000"   # 宿主机 8000 → 容器内固定 8000（uvicorn 监听端口）
+    volumes:
+      # 开发期挂载源码与配置，改动后重启容器即生效（免重新构建镜像）；生产部署应移除本行。
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./scripts:/app/scripts:ro
+      - app_workspace:/app/workspace      # 智能体工作区（LocalWorkspaceManager 的文件根目录）
+      - app_logs:/app/logs                # 结构化日志落盘目录，便于 `make logs` 与排查
+    healthcheck:
+      # 这里探的是 /readyz（就绪），不是镜像里默认的 /healthz（存活）—— 这是**有意覆盖**。
+      #
+      # 为什么 compose 用 /readyz 而镜像用 /healthz：
+      #   · /readyz 会真实地去连 PostgreSQL（SELECT 1）、ping Redis、对 Milvus 建 TCP 连接，
+      #     并检查 boot_completed（三个后端是否都进了异步上下文），全绿才返回 200；
+      #   · compose 环境下这些依赖都在（下面的 depends_on 已保证它们是 healthy 的），
+      #     所以"就绪"在这里是可判定且有意义的；
+      #   · `make up` 用的是 `docker compose up --wait`，它**只等 healthy**。因此把探针设成
+      #     /readyz，就等于让「make up 返回」这个动作本身成为「PG + Redis + Milvus 真的
+      #     都通了、应用也完成启动」的证据 —— 这正是任务书 §十一 对 P1 的验收要求。
+      #     若这里用 /healthz（零 I/O），make up 会在依赖其实没通的情况下照样返回成功，
+      #     验收就变成了空头支票。
+      #
+      # ⚠️ 两处探针的**语义差异是刻意的**，不要为了"统一"而改成一致：
+      #    · 镜像里的 /healthz 服务于 `docker run` 单跑场景（依赖不在，就绪必然失败）；
+      #    · compose 里的 /readyz 服务于 `make up` 的验收闸门。
+      #
+      # 另注：docker **不会**因为容器 unhealthy 而自动重启它（没有 autoheal 机制），
+      # 所以依赖短暂抖动只会让状态显示为 unhealthy，不会造成重启风暴。
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/readyz || exit 1"]
+      interval: 15s
+      timeout: 10s               # 需 ≥ 就绪探针自身的超时上限（probes 默认 3s/项，三项并发）
+      retries: 10
+      start_period: 90s           # 首启要跑建表迁移 + 三个后端进入异步上下文，给足宽限
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 七、Langfuse v3 —— LLM 链路追踪 / Prompt 管理 / 评测（四个容器一组）
+  # ============================================================================
+  # 甲方 N3(b) 原拍板是 v2（更省内存）。**D3 改为 v3**，原因是 v2 路线存在一个硬障碍：
+  # 本项目要求把 AgentScope 的 OTel trace 直报 Langfuse，而 OTLP 摄取端点是
+  # `/api/public/otel`，它**从 v3.22.0 才有**；v2 根本没有这个端点。也就是说
+  # 「v2 + OTLP」是死路，要么放弃 trace 直报、要么升 v3。据此升 v3。
+  #
+  # v3 相对 v2 多出三个必需组件（这就是它更重的原因）：
+  #   · langfuse-worker  —— 异步消费队列（评测、聚合、导出）。v3 把摄取拆成
+  #                         「web 只入队、worker 才落库」，故两者必须同时存在。
+  #   · clickhouse       —— 分析库，存 trace 索引与聚合。v3 的内存大户。
+  #   · langfuse-redis   —— 专用 Redis 队列。**不能复用业务 Redis**，见下。
+  # 另需一个已存在的 S3 桶存原始事件，复用本栈的 MinIO（桶由 minio 服务启动时建）。
+  #
+  # ⚠️ 与 v2 的另一个关键差异：**应用侧上报必须带 HTTP Basic 认证头**
+  #    （用户名 = public key、密码 = secret key）。缺了它一律 401，而 **401 不可重试**
+  #    （导出器只重试 408 与 5xx），拿到即整批丢弃并打一条 ERROR —— 症状是「应用照常跑、
+  #    日志反复报导出失败、Langfuse 里一条都没有」。该头已在 src/observability/tracing.py 里装配。
+  langfuse:
+    # 🔴 **必须钉死具体版本，不可写浮动的 `:3`**（本机实测教训，别改回去）。
+    #    本栈其余镜像（postgres:16-alpine、milvusdb/milvus:v3.0.2、prom/prometheus:v2.53.0、
+    #    grafana/grafana:11.1.0）本来就全是钉死的 —— 这里原本写浮动 tag 属自相矛盾。
+    #    浮动 `:3` 实测会解析到当天最新的重 build，交付物每天都在变，不可复现。
+    #
+    # 🔴 **也不能往低了钉** —— 这是一个实测撞到的降级硬墙，务必读完再改版本号。
+    #    曾试过钉到 3.22.0（它正好是 OTLP 端点的最低版本，且镜像只有 756 MB，
+    #    比 3.225.10 的 1246 MB 轻 39%，看上去是「既满足要求又省内存」的最优解）。
+    #    结果启动即退出，日志为：
+    #        error: no migration found for version 37: read down for version 37 .: file does not exist
+    #        Applying clickhouse migrations failed. Exiting...
+    #    原因：Langfuse 的 ClickHouse 迁移**只进不退**。实测两个镜像的迁移集：
+    #        3.225.10 → 编号到 0037；3.22.0 → 编号只到 0006（落后 31 个）
+    #    而这个 ClickHouse 实例**已经被 3.225.10 迁移到 0037**，旧镜像既找不到 37 号
+    #    的 up 脚本、更没有 down 脚本，于是拒绝启动。**降级 = 必须清空 ClickHouse 卷**，
+    #    那会丢掉全部历史 trace。因此本项目钉的是「已经迁移过的那一版」。
+    #    ⇒ 结论：升级 Langfuse 可以，降级要连 ClickHouse 数据一起放弃。改版本前先想清楚。
+    #
+    # ⚠️ web 与 worker 是**同一个发布物拆出的两个镜像**，版本必须逐字一致：
+    #    两者共用同一套 Postgres/ClickHouse 迁移与队列协议，版本错配会静默出错。
+    #    钉 3.225.10 而非写 `:3`，是为了让「迁移到哪一版」这件事在文件里可见、可复现。
+    image: ${ALIGO__IMAGE_REGISTRY:-}langfuse/langfuse:3.225.10
+    container_name: aligo-langfuse
+    restart: unless-stopped
+    profiles: [tracing]                     # 单独成档：它是观测栈里最重的一个，按需开关
+    environment:
+      <<: *langfuse-env                     # 与 worker 逐字一致的那一组（见文件顶部锚点）
+      # ----------------------------------------------------------------------
+      # 以下 LANGFUSE_INIT_* 只在 web 上生效：首启自动创建组织/项目/登录账号/密钥对，
+      # 省去手工在 UI 里点选。**故意不放进锚点** —— worker 不需要也不该读它们
+      # （与 Langfuse 官方 compose 的划分一致）。
+      # ----------------------------------------------------------------------
+      LANGFUSE_INIT_ORG_ID: aligo
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+      LANGFUSE_INIT_PROJECT_ID: aligo-travel
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+      # 🔴 必须把容器内的 HOSTNAME 覆盖成 0.0.0.0 —— 否则健康检查永远失败。
+      #    原因（本机实测，非推测）：Langfuse v3 的 web 是 **Next.js standalone**，
+      #    它的启动脚本以 `process.env.HOSTNAME` 作为监听地址，而 Docker 默认把
+      #    HOSTNAME 设成**容器自己的 ID**。于是服务只绑到容器 IP，实测
+      #    `netstat` 显示 `172.18.0.13:3000 LISTEN`（而非 0.0.0.0:3000），
+      #    导致容器内 `wget http://localhost:3000/...` 与 `http://127.0.0.1:3000/...`
+      #    **双双 Connection refused**，容器永久 unhealthy，
+      #    `make up-tracing` 以 `dependency failed to start` 整体失败 —— 但服务其实完全正常。
+      #    改成 0.0.0.0 后监听变成全网卡，容器内自探与宿主端口映射都正常。
+      #    ⚠️ 这一条同样适用于下面的 langfuse-worker（它是 Node 进程，行为一致）。
+      HOSTNAME: "0.0.0.0"
+      # 🔴 必须显式给 Node 设堆上限，否则容器会 OOM 崩溃（实测 `Exited (134)`）。
+      #    原因：Node 会**按 cgroup 内存上限自动推算** `--max-old-space-size`（约取一半）。
+      #    本服务原设 768M 上限 ⇒ Node 自定堆约 384M，实测日志正是
+      #    `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory`
+      #    于 `Mark-Compact 378.6 MB -> 377.1 MB` 处崩溃。也就是说：**是 Node 自己划的
+      #    堆上限先撞墙，不是 VM 真的没内存**（同时刻 `free -m` 尚余 1.5 GiB available）。
+      #    显式给出堆大小后，进程能用到部署者真正打算给它的量。
+      # ⚠️ 640 这个值**实测不够**：设成 640 后仍旧堆溢出而崩，日志为
+      #    `Mark-Compact (reduce) 633.8 (648.4) -> 631.8 (642.9) MB`
+      #    —— 即堆是稳稳涨到上限才死的，不是抖动。3.225.10 的 Next.js 应用体量
+      #    （实测 74 个 ClickHouse 迁移、启动时要注册大量路由）确实需要更多。
+      #    故上调到 768。
+      # ⚠️ 这个值必须**小于下面的 mem_limit**：Node 的 RSS 通常是堆的 1.3～1.5 倍
+      #    （堆外还有 Buffer/元数据），留足余量才不会被 cgroup OOM Killer 杀掉。
+      #    改这里时请一并调整 deploy.resources.limits.memory，两者是配对参数。
+      NODE_OPTIONS: "--max-old-space-size=768"
+    ports:
+      - "3001:3000"               # 宿主机 3001 → 容器 3000，Langfuse Web 控制台
+    healthcheck:
+      # v3 的健康端点与 v2 相同，仍是 /api/public/health（200 表示服务与数据库均就绪）。
+      # 用 127.0.0.1 而非 localhost：本探针也是 busybox wget（与 clickhouse 那个同一类客户端），
+      # 而 busybox wget 只用解析结果第一条且不回落 —— 这条链路的完整实测与机理见下方
+      # clickhouse 的 healthcheck 注释，别只看结论。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/public/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 120s          # v3 首启要跑三套迁移（Postgres + ClickHouse）并建桶，给足宽限
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy   # 事件对象存储，桶由 minio 的 entrypoint 预先建好
+    deploy:
+      resources:
+        limits:
+          # ⚠️ 必须显著大于上面的 --max-old-space-size=768：Node 的 RSS 除堆之外还有
+          #    Buffer、JIT 代码、原生结构，通常是堆的 1.3~1.5 倍。
+          #    768 × 1.5 ≈ 1152M，再留出余量 ⇒ 给 1408M。
+          #    （实测教训：原先给 768M 且未设 NODE_OPTIONS，Node 自定堆仅 ~384M 即 OOM。）
+          # ⚠️ 这是本栈唯一一个「上限本身就贴着 VM 天花板」的服务：本机 Docker VM
+          #    只有 3914 MiB。2026-09-24 实测：本服务约 688 MiB、其余 11 个容器合计约 1717 MiB。
+          #    它仍是全栈 cap 最大的一个，故不随意上调 —— 真要再加，先测 13 个全开时的真实占用。
+          memory: 1408M
+    networks: [aligo-net]
+
+  # ----------------------------------------------------------------------------
+  # 七之二、Langfuse Worker —— 消费摄取队列并落库（v3 相较 v2 新增的必需组件）
+  # ----------------------------------------------------------------------------
+  langfuse-worker:
+    # 版本必须与上方 langfuse web **逐字一致**（同为 3.225.10），理由见那里的注释。
+    image: ${ALIGO__IMAGE_REGISTRY:-}langfuse/langfuse-worker:3.225.10
+    container_name: aligo-langfuse-worker
+    restart: unless-stopped
+    profiles: [tracing]
+    environment:
+      <<: *langfuse-env            # 必须与 web 完全一致，故共用锚点
+      # 同 web：Docker 把 HOSTNAME 设为容器 ID，Node 便只绑容器 IP，
+      # 使容器内自探必然 Connection refused。覆盖成 0.0.0.0（详见 langfuse 服务注释）。
+      HOSTNAME: "0.0.0.0"
+      # 同 web：显式给堆上限，避免 Node 按 cgroup 上限自动推算出一个过小的堆而 OOM。
+      # 堆上限必须小于下方 mem_limit（RSS ≈ 堆的 1.3~1.5 倍），改一动二。
+      NODE_OPTIONS: "--max-old-space-size=512"
+    # ⚠️ **不发布任何宿主端口**：worker 不提供 HTTP 服务（其内部 3030 仅供容器间探活），
+    #    只消费 Redis 队列。对外暴露它没有任何用途，反而多一个攻击面。
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      # worker 没有 /api/public/health 那样的业务端点，只能探它内部管理端口的根路径。
+      # 🔴 路径是 **`/`**，不是 `/health` —— 本机实测：`/` 返回 200，
+      #    而 `/health`、`/healthz`、`/ready`、`/metrics` **全部 404**。
+      #    这是对着运行中的容器逐个 fetch 得出的，别照直觉改成 /health。
+      # ⚠️ 这里**不能用 depends_on 的 service_healthy 去卡 web**：worker 启动稍慢是常态，
+      #    把它设为 web 的启动前提会造成互相等待。故 web 只等 postgres/clickhouse/redis/minio。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3030/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          # 同 langfuse web：须大于 --max-old-space-size=512 并留出堆外余量。
+          memory: 896M
+    networks: [aligo-net]
+
+  # ----------------------------------------------------------------------------
+  # 七之三、ClickHouse —— Langfuse v3 的分析库（trace 索引与聚合）
+  # ----------------------------------------------------------------------------
+  clickhouse:
+    image: ${ALIGO__IMAGE_REGISTRY:-}clickhouse/clickhouse-server:24.3-alpine
+    container_name: aligo-clickhouse
+    restart: unless-stopped
+    profiles: [tracing]
+    # ⚠️ 必须以非 root 运行且固定 UID:GID = 101:101 —— 这是官方镜像内 `clickhouse`
+    #    用户与组的固定编号，也是 Langfuse 官方 compose 的写法。用其他 UID 会让
+    #    数据卷的属主与进程不匹配，ClickHouse 直接以权限错误退出。
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    # ⚠️ **刻意不发布任何宿主端口**，这是本服务最容易踩的坑：
+    #    ClickHouse 官方 compose 会写 `127.0.0.1:9000:9000`，而 9000 在本栈已被
+    #    **MinIO 的 S3 API** 占用（见上面的 minio.ports）。照抄官方写法会让
+    #    `make up-tracing` 直接以端口冲突失败：`Bind for 0.0.0.0:9000 failed`。
+    #    本服务只需被 langfuse/web 与 worker 通过服务名访问，故对内网暴露即可，
+    #    排障可走 `docker exec aligo-clickhouse clickhouse-client`。
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse        # 表数据与分析结果
+      - clickhouse_logs:/var/log/clickhouse-server # 查询日志，排障用
+    healthcheck:
+      # /ping 返回 "Ok." 是官方探针。
+      # 🔴 必须写 **127.0.0.1**，不能写 `localhost` —— 这是本机实测踩到的坑，不是风格偏好。
+      #    真实机理（2026-09-24 在运行中的 aligo-clickhouse 里逐条实测，与早期注释说的**不一样**，
+      #    早期那句「/etc/hosts 里没有 127.0.0.1 那一行」是**错的**，已改正）：
+      #      · /etc/hosts **确实有** `127.0.0.1 localhost`（第 1 行），不是缺这一行；
+      #      · 但 `getent hosts localhost` 只返回 **`::1`**（hosts 只给一条，且 IPv6 在前）；
+      #        `getent ahosts localhost` 才两条都给（::1 在前、127.0.0.1 在后）。
+      #      · ClickHouse 只监听 IPv4（`netstat -tln` 里 IPv6 监听数为 **0**）。
+      #      · 关键：**busybox 的 wget 只用解析结果的第一条且不回落** →
+      #        `wget http://localhost:8123/ping` 打到 `[::1]:8123` → **Connection refused**（实测 rc=1）；
+      #        换成 `http://127.0.0.1:8123/ping` → **rc=0**。
+      #    于是健康检查永远失败、容器永久 unhealthy，进而让 `make up-tracing` 以
+      #    `dependency failed to start` 整体失败 —— 而 ClickHouse 本身完全正常
+      #    （`clickhouse-client` 能查版本、8123 在 LISTEN）。
+      #    ⚠️ 这个坑**只对 busybox wget 成立**：app/minio/milvus 镜像里是 **curl**，curl 会回落，
+      #    实测 `docker exec aligo-app curl http://localhost:8000/healthz` → **200**。
+      #    所以别把这条结论推广成「凡是 localhost 就出事」—— 要看探针用的是哪个客户端。
+      #    ⚠️ Langfuse 官方 compose 的探针写的正是 `localhost`，同样有这个隐患。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M            # 本栈内存大户之一，显式设上限防止吃光 3.82 GiB 的 VM
+    networks: [aligo-net]
+
+  # ----------------------------------------------------------------------------
+  # 七之四、Langfuse 专用 Redis —— 摄取队列（**不可复用业务 Redis**）
+  # ----------------------------------------------------------------------------
+  # 为什么必须另起一个实例，而不是让 Langfuse 直接连本栈已有的 redis：
+  #   · **淘汰策略冲突**：BullMQ 队列要求 `noeviction` —— 队列里任何一条被淘汰都意味着
+  #     trace 永久丢失。而业务 Redis 需要设 maxmemory 上限并在必要时淘汰缓存键。
+  #     二者对同一个实例的要求直接矛盾，只能分开。（Langfuse 官方 compose 同样用
+  #     独立 Redis，理由相同。）
+  #   · **故障隔离**：业务侧一次 `FLUSHDB` 清缓存不应连带清掉 Langfuse 的队列。
+  langfuse-redis:
+    image: ${ALIGO__IMAGE_REGISTRY:-}redis:7-alpine
+    container_name: aligo-langfuse-redis
+    restart: unless-stopped
+    profiles: [tracing]
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "${LANGFUSE_REDIS_PASSWORD}"
+      - "--maxmemory-policy"
+      - "noeviction"                # 见上方注释：队列数据不允许被淘汰
+      - "--appendonly"
+      - "yes"                       # 开 AOF：容器重启后队列不丢，trace 不至于断档
+    # ⚠️ **刻意不发布宿主端口**：6379 已被业务 redis 占用，发布必然冲突。
+    #    Langfuse 通过服务名 langfuse-redis 在内部网络访问即可。
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      # 该实例带密码，故探针必须显式认证；用环境变量而非明文，避免密码出现在
+      # `docker inspect` 的健康检查命令里。
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    environment:
+      # 仅供上面的健康检查探针读取，不传给应用（应用用的是锚点里的 REDIS_AUTH）。
+      REDIS_PASSWORD: ${LANGFUSE_REDIS_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 八、Prometheus —— 指标抓取（抓 app:8000/metrics 与 Prometheus 自身）
+  # ============================================================================
+  # 注：抓取目标以 scripts/prometheus/prometheus.yml 为唯一真值，当前只有 2 个 job
+  #     （aligo-app、prometheus）。**Milvus 的 9091 /metrics 目前并未被抓取** ——
+  #     本注释早先写成「应用 /metrics + Milvus /metrics」，与配置文件不符，已更正。
+  prometheus:
+    image: ${ALIGO__IMAGE_REGISTRY:-}prom/prometheus:v2.53.0
+    container_name: aligo-prometheus
+    restart: unless-stopped
+    profiles: [observability]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"   # 抓取配置路径
+      - "--storage.tsdb.path=/prometheus"                # 时序数据落盘目录
+      - "--storage.tsdb.retention.time=7d"               # 本地保留 7 天，防止磁盘被吃满
+      - "--web.enable-lifecycle"                         # 允许 POST /-/reload 热加载配置
+    ports:
+      - "9090:9090"               # 宿主机 9090 → 容器 9090，Prometheus Web 界面
+    volumes:
+      - ./scripts/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro  # 抓取目标配置
+      - prometheus_data:/prometheus
+    healthcheck:
+      # promtool 是镜像自带工具，用于校验配置并连带检查进程存活
+      test: ["CMD", "promtool", "check", "config", "/etc/prometheus/prometheus.yml"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 九、Grafana —— 指标可视化面板
+  # ============================================================================
+  grafana:
+    image: ${ALIGO__IMAGE_REGISTRY:-}grafana/grafana:11.1.0
+    container_name: aligo-grafana
+    restart: unless-stopped
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"        # 关闭自助注册，只有管理员可建号
+      GF_INSTALL_PLUGINS: ""                 # 不装额外插件，避免启动时联网下载拖慢探活
+      TZ: Asia/Shanghai
+    ports:
+      - "3000:3000"               # 宿主机 3000 → 容器 3000，Grafana Web 界面
+    volumes:
+      - grafana_data:/var/lib/grafana                                        # 面板与用户数据持久化
+      - ./scripts/grafana/provisioning:/etc/grafana/provisioning:ro           # 自动配置数据源与面板
+    healthcheck:
+      # Grafana 自带 /api/health 端点
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+    networks: [aligo-net]
+
+  # ============================================================================
+  # 十、MaxKB —— 可选的企业知识库（甲方 #5 拍板：自建 Milvus RAG 为主，本服务默认关停）
+  # ============================================================================
+  maxkb:
+    image: ${ALIGO__IMAGE_REGISTRY:-}1panel/maxkb:latest
+    container_name: aligo-maxkb
+    restart: unless-stopped
+    profiles: [optional]          # 仅 `--profile optional` 时启动，默认不占用内存
+    environment:
+      PG_PASSWORD: ${MAXKB_PG_PASSWORD}
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"               # 宿主机 8080 → 容器 8080，MaxKB Web 控制台
+    volumes:
+      - maxkb_data:/var/lib/postgresql/data    # MaxKB 自带 PG，数据独立持久化
+    # ⚠️ 探针曾经写成 `curl -f http://localhost:8080/api/health`，那是**恒失败的**：
+    #    MaxKB 的根 urlconf 只把五个子路由挂在 `api/` 下
+    #    （users / dataset / setting / application / function_lib），**没有任何 health 路由**；
+    #    而它的 `handler404` 对 `/api/` 开头的路径一律返回 HTTP 404。
+    #    于是 `curl -f` 必然以退出码 22 失败 → 容器永久 unhealthy →
+    #    `make up-optional` 的 `--wait` 只能干等到 WAIT_TIMEOUT 才报错，
+    #    且错误信息看起来像「MaxKB 起不来」，其实服务好好的。
+    #
+    # 现在改为**存活探测**：故意**不加 `-f`**。curl 不加 `-f` 时，只要拿到了任何 HTTP 响应
+    #    （哪怕 404）就返回 0；只有在连不上/超时（退出码 7/28）时才非 0。
+    #   这正是我们想知道的：「MaxKB 的 Web 进程在 8080 上应答了吗」。
+    #   它**不**验证业务可用性（登录、模型、向量库都不在内）—— 探针能做到的本来就只是这一层。
+    #
+    # 证据强度（2026-09-24）：上面关于路由与 handler404 的结论来自 MaxKB 源码仓库
+    #    `1Panel-dev/MaxKB` 的 **`main`** 与 **`release-1.7`** 两个分支（只核了这两个：
+    #    各自的 `apps/smartdoc/urls.py`，以及 `installer/Dockerfile-python-pg` 证明基础镜像装了 curl）。
+    #    未核其它分支/标签，所以别写成「v1 与 v2 都已核对」那种更宽的结论。
+    #   **未**做运行时验证：没有拉取多 GB 的 `1panel/maxkb:latest` 镜像起容器实测。
+    #   `:latest` 还是浮动标签，上游改版后探针路径可能再变 —— 若 `make up-optional` 报
+    #   MaxKB unhealthy，先手工 `docker exec aligo-maxkb curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/`
+    #   看是不是 000（连不上）还是 404（连上了，探针要跟着上游调）。
+    #
+    # 为什么写 127.0.0.1 而不是 localhost：**这是预防性的，不是本镜像已实测出的坑**。
+    #   本仓库已实测过同类现象：clickhouse 的探针写 localhost 会 Connection refused
+    #   （完整实测与机理见本文件 clickhouse 的 healthcheck 注释 —— 注意那条结论绑定的是
+    #   「busybox wget 不回落」，而不是「localhost 本身有问题」）。
+    #   本探针用的是 **curl**，而 curl 会回落到 IPv4（实测 app 镜像里 curl localhost 得 200），
+    #   所以**很可能**本来就没问题。MaxKB 是另一个镜像，我们**没有**验证过它。
+    #   写死字面量 IPv4 可以把这一整类不确定性绕开，代价为零 —— 所以写 127.0.0.1。
+    #   别把它当成「MaxKB 有这个已知问题」来引用。
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS -o /dev/null http://127.0.0.1:8080/api/ || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    networks: [aligo-net]
+
+
+# ==============================================================================
+# 网络与数据卷
+# ==============================================================================
+networks:
+  aligo-net:
+    driver: bridge               # 默认桥接网络；服务间用服务名互访，无需暴露到宿主机
+
+volumes:
+  pg_data:                       # PostgreSQL 数据
+  redis_data:                    # Redis AOF 数据
+  etcd_data:                     # etcd 元数据
+  minio_data:                    # MinIO 对象数据（Milvus 索引文件）
+  milvus_data:                   # Milvus 本地工作目录
+  app_workspace:                 # 智能体工作区文件
+  app_logs:                      # 应用结构化日志
+  prometheus_data:               # Prometheus 时序数据
+  grafana_data:                  # Grafana 面板与用户
+  maxkb_data:                    # MaxKB 自带的 Postgres 数据
+  clickhouse_data:               # ClickHouse 表数据（Langfuse v3 的 trace 索引与聚合）
+  clickhouse_logs:               # ClickHouse 查询日志（排障用，可随时清空）
+  langfuse_redis_data:           # Langfuse 专用 Redis 的 AOF（摄取队列，不可丢）

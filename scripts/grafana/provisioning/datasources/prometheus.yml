@@ -1,0 +1,69 @@
+# ==============================================================================
+# 文件职责：Grafana 的**数据源**自动配置（provisioning）。
+#
+# 挂载方式：./scripts/grafana/provisioning → /etc/grafana/provisioning（只读）
+#           （见 docker-compose.yaml 的 grafana.volumes）
+#           Grafana 启动时扫描该目录，读到本文件即自动创建数据源。
+#
+# 为什么用 provisioning 而不是「进 Grafana 界面点两下建数据源」
+# ------------------------------------------------------------------------------
+#   手工建的数据源存在 grafana_data 卷里。这意味着：
+#     · 换台机器 / 删卷重来 ⇒ 数据源没了，所有面板报 "Datasource not found"，
+#       而修复方法是「进界面再点一遍」—— 一件只存在于某个人记忆里的操作；
+#     · 交付给甲方时，面板能不能用取决于我们有没有把「点两下」这件事写清楚。
+#   写进文件之后，`make up-obs` 起来就是配好的，数据源定义与代码一起进版本库、
+#   一起被评审。
+#
+# ⚠️ uid 必须写死（不能让 Grafana 自动生成）
+# ------------------------------------------------------------------------------
+#   本目录下 dashboards/ 里的面板 JSON 用 `"datasource": {"type":"prometheus",
+#   "uid":"aligo-prometheus"}` **按 uid 引用**数据源。若这里不写 uid，
+#   Grafana 会随机生成一个（形如 `PBFA97CFB590B2093`），那么面板里的引用
+#   永远对不上 —— 表现是面板能打开、但每个图都显示
+#   "Datasource aligo-prometheus was not found"，而不是一片空白。
+#   两处必须逐字一致，改这里就要同步改面板 JSON 里的每一处引用。
+# ==============================================================================
+
+apiVersion: 1
+
+# 清理策略：**保留**（不删）。
+# 不写这个字段时 Grafana 默认也是 false，但显式写出来是为了表明这是**决策**
+# 而不是遗漏：如果设成 true，那么任何「在界面上手工加的数据源」都会在下次
+# Grafana 重启时被删掉 —— 一个只在重启时才发作、且看起来像「我的配置丢了」的行为。
+deleteDatasources: []
+
+datasources:
+  - name: Prometheus
+    # 类型标识，Grafana 内置的 Prometheus 支持。
+    type: prometheus
+    # ⚠️ 见文件头的说明：这个 uid 被 dashboards/ 里的面板 JSON 引用，不能改。
+    uid: aligo-prometheus
+    # 是否作为默认数据源。本项目只有这一个，设 true 可以让新建面板时少点一次选择。
+    isDefault: true
+    # 允许在面板里直接编辑查询。开发期方便调试；生产可设为 false 收紧。
+    editable: true
+
+    url: http://prometheus:9090
+
+    # 访问方式：从 Grafana **服务端**发请求（而不是让浏览器直接去连）。
+    # ⚠️ 这一项选错是「面板在开发机上正常、在别人机器上全空」的常见原因：
+    #    browser 方式下，请求由**浏览器**发出，`prometheus:9090` 这个 compose
+    #    服务名在浏览器所在的宿主机上解析不了（那是容器网络内部的名字）。
+    #    只有把 Grafana 端口映射到宿主机、且用 localhost 才能侥幸跑通。
+    access: proxy
+
+    # 数据源级别的默认时间范围，与下面的面板保持一致（最近 1 小时）。
+    jsonData:
+      # 抓取间隔告知 Grafana，它据此决定 $__rate_interval 的最小粒度。
+      # 必须与 scripts/prometheus/prometheus.yml 的 global.scrape_interval 一致，
+      # 否则 rate() 窗口会小于实际采样间隔 ⇒ 曲线出现锯齿或空洞。
+      timeInterval: 15s
+      # 走服务端代理时，HTTP 方法用 POST（查询串较长时避免 URL 长度限制）。
+      httpMethod: POST
+      # 让 Grafana 直接使用后端返回的时间戳，不做额外对齐。
+      # 关掉它时 Grafana 会按自己的抓取节奏重采样，把细粒度的毛刺抹平 ——
+      # 而那正是排查「偶发超时」时想看到的东西。
+      # ⚠️ 与上面 timeInterval 无冲突：前者影响 rate 窗口，本项影响展示重采样。
+      prometheusType: Prometheus
+      # 版本号，影响 Grafana 启用哪些查询特性（如 exemplars）。
+      prometheusVersion: 2.53.0

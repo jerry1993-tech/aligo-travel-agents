@@ -1,0 +1,590 @@
+{
+  "__comment": [
+    "文件职责：AliGo 差旅助手的 Grafana 总览面板（P1 版本）。",
+    "",
+    "这个 __comment 字段不是 Grafana 的语法 —— Grafana 会忽略不认识的顶层键。",
+    "写在这里是因为 JSON 标准不支持注释，而这份文件里有几处**必须被解释**的约定，",
+    "散落在别处就没人会读：",
+    "",
+    "1) 数据源按 uid 引用：每一处 \"datasource\" 都写死了 \"uid\": \"aligo-prometheus\"。",
+    "   这个 uid 定义在 ../datasources/prometheus.yml。改动任一处都要同步改另一处 ——",
+    "   对不上的症状是面板能打开、但每个图都显示 'Datasource not found'，",
+    "   而不是一片空白（后者会让人以为是没数据）。",
+    "",
+    "2) 指标名与 src/observability/metrics.py 逐字对应。prometheus_client 会自动给",
+    "   Counter 加 _total 后缀、给 Histogram 加 _bucket/_count/_sum 后缀，",
+    "   因此源码里的 HTTP_REQUESTS_TOTAL 在这里写作 aligo_http_requests_total。",
+    "   改 metrics.py 的指标名必须同步改本文件，否则面板会静默变空。",
+    "",
+    "3) 所有 rate() 都用 $__rate_interval 而不是写死的 [5m]：",
+    "   它是 Grafana 根据抓取间隔与当前时间范围算出来的窗口。",
+    "   写死 [5m] 时，若用户把时间范围缩到 5 分钟以内，rate 窗口会超过所选范围，",
+    "   曲线会出现「明明有流量却显示为 0」的假象。",
+    "",
+    "4) 本面板**不覆盖** Milvus / Redis / PostgreSQL 的指标 —— 那三者当前没有被抓取，",
+    "   原因与补齐方式见 scripts/prometheus/prometheus.yml 末尾的「已知的覆盖缺口」。"
+  ],
+
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["aligo", "travel-assistant"],
+
+  "templating": { "list": [] },
+
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AliGo 差旅助手 · 总览",
+  "uid": "aligo-overview",
+  "version": 0,
+  "weekStart": "",
+
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "服务就绪",
+      "description": "aligo_ready：/readyz 的判定结果。1 = 全部必需依赖可用；0 = 不该接流量。它由探针在每次被调用时刷新，因此这里看到的是**最近一次探针调用**的结果，不是实时探测。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "未就绪", "color": "red", "index": 0 },
+                "1": { "text": "就绪", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "aligo_ready",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "模型熔断器",
+      "description": "aligo_model_breaker_state：自研熔断器的状态。0=闭合(CLOSED，正常放行) / 1=半开(HALF_OPEN，只放一个试探) / 2=开路(OPEN，快速失败不打网络)。\n\n⚠️ 看到 2 时不要先去查应用 —— 那说明**下游模型服务**已在持续失败，本服务正确地停止了对它的调用。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "闭合", "color": "green", "index": 0 },
+                "1": { "text": "半开", "color": "yellow", "index": 1 },
+                "2": { "text": "开路", "color": "red", "index": 2 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "aligo_model_breaker_state",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "在途请求",
+      "description": "aligo_http_in_flight_requests：当前尚未返回的 HTTP 请求数。\n\n用途是区分「慢」与「卡死」：请求速率下降而它持续攀升，说明请求在堆积（下游阻塞），而不是流量本身变少了。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 20 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "aligo_http_in_flight_requests",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "抓取目标存活",
+      "description": "up：Prometheus 是否成功抓到了目标。此面板与「服务就绪」不同 —— 它测的是**采集链路**，不是服务本身。\n\n两者一起看才能定位「面板全空」的原因：up=0 说明抓取失败（网络/端口/配置），up=1 而指标为空说明抓到了但没有数据。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red", "index": 0 },
+                "1": { "text": "UP", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "up",
+          "instant": true,
+          "range": false,
+          "refId": "A",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "请求速率（按路由）",
+      "description": "rate(aligo_http_requests_total)：每秒请求数，按 method + route 分组。\n\n⚠️ route 用的是**路由模板**（如 /sessions/{session_id}）而不是原始路径。这正是它有意义的前提 —— 用原始路径时，每个用户会产生一条独立时间序列，指标基数会随用户数线性爆炸（Prometheus 最常见的「被自己压垮」的方式）。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (method, route) (rate(aligo_http_requests_total[$__rate_interval]))",
+          "legendFormat": "{{method}} {{route}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "请求延迟分位（P50 / P95 / P99）",
+      "description": "histogram_quantile 从 aligo_http_request_duration_seconds_bucket 算出分位值。\n\n⚠️ 直方图默认的桶边界是按 HTTP 场景选的（毫秒级到秒级）。若真实延迟集中在最小的那个桶里（所有请求都 <5ms），三个分位曲线会**完全重合** —— 那不是面板坏了，是桶不够细。此时应当调整 metrics.py 里的 buckets，而不是怀疑查询写错。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(aligo_http_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P50",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(aligo_http_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P95",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(aligo_http_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99",
+          "range": true,
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "HTTP 状态码分布",
+      "description": "按 status 标签分组的请求速率。\n\n⚠️ 这里刻意**不**做「错误率」这个派生指标。原因：一个把 4xx 也算成错误的错误率，会在用户输错参数时触发告警；而只算 5xx 又漏掉了 429（限流）。到底哪些算「错」，取决于当前在看什么 —— 把原始分布摆出来，让看图的人自己判断，比替他们决定更可靠。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "normal" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (status) (rate(aligo_http_requests_total[$__rate_interval]))",
+          "legendFormat": "{{status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "模型调用结果（ok / error / rejected）",
+      "description": "aligo_model_calls_total 按 outcome 分组。\n\n⚠️ 三个取值的含义必须分清，否则会得出相反的结论：\n  · ok       —— 调用成功\n  · error    —— 真的打到了下游并失败（下游有问题）\n  · rejected —— 熔断器拦截，**没有发出去**（下游可能已经挂了，本服务在自我保护）\n\n只看 error 会漏掉 rejected；只看总量则会把「自我保护生效」误读成「流量下降」。\n另注：rejected 不参与延迟直方图统计（它没有真实的调用耗时），这是 metrics.py 里的刻意处理。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "cps",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "error" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "rejected" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "ok" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (outcome) (rate(aligo_model_calls_total[$__rate_interval]))",
+          "legendFormat": "{{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "模型调用延迟分位",
+      "description": "模型调用的 P50 / P95 / P99。与 HTTP 延迟分开看，才能区分「服务慢」与「模型慢」—— 前者通常是本服务的代码或锁，后者是下游。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le, model) (rate(aligo_model_call_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P50 {{model}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(aligo_model_call_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P95 {{model}}",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Token 吞吐（输入 / 输出）",
+      "description": "aligo_model_tokens_total 按 direction 分组。这是**成本面板的数据源** —— 计费按 token 算，而 token 数与请求数不成正比（一次长上下文请求可能抵几十次短请求）。\n\n⚠️ 在零密钥（MockLLM）环境下这里会有数据但数值是估算的：Mock 按字符数折算 token，不接真实的 tokenizer。它的用途是验证**这条链路是通的**，不是用来估成本的。",
+      "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "cps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "aligo-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (direction) (rate(aligo_model_tokens_total[$__rate_interval]))",
+          "legendFormat": "{{direction}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

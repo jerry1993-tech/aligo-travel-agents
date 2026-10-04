@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<title>准确率提升至 90%，阿里商旅基于 AgentScope 构建多智能体差旅助手最佳实践 — AgentScope Blog</title>
+<link rel="canonical" href="https://agentscope.io/blog/alibaba-business-travel/"/>
+<link rel="icon" type="image/png" href="../../logo.svg"/>
+<link rel="stylesheet" href="../../assets/css/main.css"/>
+
+</head>
+<body>
+<nav class="nav" id="nav">
+  <a class="nav-brand" href="../../">
+    <img src="../../logo.svg" alt="AgentScope"/>
+    <span>AgentScope</span>
+  </a>
+  <button class="nav-toggle" type="button" aria-label="Menu" aria-controls="nav-links" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="nav-links" id="nav-links">
+    <a href="https://docs.agentscope.io/" target="_blank">Docs</a>
+    <div class="nav-projects">
+      <a class="nav-projects-trigger" href="../../#projects" aria-haspopup="true">
+        Projects
+        <svg class="caret" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 4l4 4 4-4z"/></svg>
+      </a>
+      <div class="nav-projects-menu" role="menu">
+        <div class="nav-projects-grid">
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope" target="_blank" rel="noopener">
+            <span class="name">agentscope</span>
+            <span class="desc">Core open-source framework for building agents you can see, understand, and trust.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/QwenPaw" target="_blank" rel="noopener">
+            <span class="name">QwenPaw</span>
+            <span class="desc">Personal AI assistant — easy to install on your machine or the cloud.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/AgentTeams" target="_blank" rel="noopener">
+            <span class="name">Agent Teams</span>
+            <span class="desc">Collaborative multi-agent OS for human-in-the-loop coordination via Matrix.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/ReMe" target="_blank" rel="noopener">
+            <span class="name">ReMe</span>
+            <span class="desc">Memory management kit for agents — Remember Me, Refine Me.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope-java" target="_blank" rel="noopener">
+            <span class="name">agentscope-java</span>
+            <span class="desc">Agent-oriented programming for the JVM.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/Trinity-RFT" target="_blank" rel="noopener">
+            <span class="name">Trinity-RFT</span>
+            <span class="desc">Flexible, scalable framework for reinforcement fine-tuning of LLMs.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/OpenJudge" target="_blank" rel="noopener">
+            <span class="name">OpenJudge</span>
+            <span class="desc">Unified framework for holistic evaluation and quality rewards.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope-studio" target="_blank" rel="noopener">
+            <span class="name">agentscope-studio</span>
+            <span class="desc">Development-oriented visualization toolkit for agent runs.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope-spark-design" target="_blank" rel="noopener">
+            <span class="name">agentscope-spark-design</span>
+            <span class="desc">UI component library for Alibaba Cloud Apsara Lab.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope-samples" target="_blank" rel="noopener">
+            <span class="name">agentscope-samples</span>
+            <span class="desc">Ready-to-use Python sample agents — from CLI tools to full-stack apps.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/skills" target="_blank" rel="noopener">
+            <span class="name">skills</span>
+            <span class="desc">Curated skills around the AgentScope ecosystem and CoPaw applications.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope-bricks" target="_blank" rel="noopener">
+            <span class="name">agentscope-bricks</span>
+            <span class="desc">Production-ready agent components compatible with AgentScope, LangGraph, AutoGen.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/TuFT" target="_blank" rel="noopener">
+            <span class="name">TuFT</span>
+            <span class="desc">Multi-tenant fine-tuning for local LLMs with a Tinker-compatible API.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://www.pawfriends.live/" target="_blank" rel="noopener">
+            <span class="name">PawFriends</span>
+            <span class="desc">Social media for AI agents — give your agent a personality and watch it make friends.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/DojoZero" target="_blank" rel="noopener">
+            <span class="name">DojoZero</span>
+            <span class="desc">Agents that run on realtime data and predict future game outcomes.</span>
+          </a>
+          <a class="nav-project-item" role="menuitem" href="https://github.com/agentscope-ai/agentscope-typescript" target="_blank" rel="noopener">
+            <span class="name">agentscope-typescript</span>
+            <span class="desc">TypeScript agent framework — born for agent systems.</span>
+          </a>
+        </div>
+      </div>
+    </div>
+    <a href="../../blog/" class="active">Blogs</a>
+    <a href="../../community/">Community</a>
+    <div class="nav-socials">
+      <a class="nav-icon" href="https://github.com/agentscope-ai" target="_blank" rel="noopener" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.73.5.5 5.74.5 12.02c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-1.96c-3.2.7-3.87-1.54-3.87-1.54-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.69.08-.69 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.35.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.15 1.18a10.9 10.9 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.59.23 2.76.12 3.05.74.8 1.18 1.83 1.18 3.09 0 4.42-2.69 5.4-5.25 5.68.41.36.78 1.06.78 2.14v3.18c0 .31.21.68.8.56C20.71 21.4 24 17.09 24 12.02 24 5.74 18.77.5 12.5.5h-.5Z"/></svg>
+      </a>
+      <a class="nav-icon" href="https://x.com/agentscope_ai" target="_blank" rel="noopener" aria-label="X (Twitter)">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+      </a>
+      <a class="nav-icon" href="https://discord.com/invite/eYMpfnkG8h" target="_blank" rel="noopener" aria-label="Discord">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+      </a>
+      <a class="nav-icon" href="https://www.xiaohongshu.com/user/profile/691c18db0000000037032be9" target="_blank" rel="noopener" aria-label="RedNote (Xiaohongshu)">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M22.405 9.879c.002.016.01.02.07.019h.725a.797.797 0 0 0 .78-.972.794.794 0 0 0-.884-.618.795.795 0 0 0-.692.794c0 .101-.002.666.001.777zm-11.509 4.808c-.203.001-1.353.004-1.685.003a2.528 2.528 0 0 1-.766-.126.025.025 0 0 0-.03.014L7.7 16.127a.025.025 0 0 0 .01.032c.111.06.336.124.495.124.66.01 1.32.002 1.981 0 .01 0 .02-.006.023-.015l.712-1.545a.025.025 0 0 0-.024-.036zM.477 9.91c-.071 0-.076.002-.076.01a.834.834 0 0 0-.01.08c-.027.397-.038.495-.234 3.06-.012.24-.034.389-.135.607-.026.057-.033.042.003.112.046.092.681 1.523.787 1.74.008.015.011.02.017.02.008 0 .033-.026.047-.044.147-.187.268-.391.371-.606.306-.635.44-1.325.486-1.706.014-.11.021-.22.03-.33l.204-2.616.022-.293c.003-.029 0-.033-.03-.034zm7.203 3.757a1.427 1.427 0 0 1-.135-.607c-.004-.084-.031-.39-.235-3.06a.443.443 0 0 0-.01-.082c-.004-.011-.052-.008-.076-.008h-1.48c-.03.001-.034.005-.03.034l.021.293c.076.982.153 1.964.233 2.946.05.4.186 1.085.487 1.706.103.215.223.419.37.606.015.018.037.051.048.049.02-.003.742-1.642.804-1.765.036-.07.03-.055.003-.112zm3.861-.913h-.872a.126.126 0 0 1-.116-.178l1.178-2.625a.025.025 0 0 0-.023-.035l-1.318-.003a.148.148 0 0 1-.135-.21l.876-1.954a.025.025 0 0 0-.023-.035h-1.56c-.01 0-.02.006-.024.015l-.926 2.068c-.085.169-.314.634-.399.938a.534.534 0 0 0-.02.191.46.46 0 0 0 .23.378.981.981 0 0 0 .46.119h.59c.041 0-.688 1.482-.834 1.972a.53.53 0 0 0-.023.172.465.465 0 0 0 .23.398c.15.092.342.12.475.12l1.66-.001c.01 0 .02-.006.023-.015l.575-1.28a.025.025 0 0 0-.024-.035zm-6.93-4.937H3.1a.032.032 0 0 0-.034.033c0 1.048-.01 2.795-.01 6.829 0 .288-.269.262-.28.262h-.74c-.04.001-.044.004-.04.047.001.037.465 1.064.555 1.263.01.02.03.033.051.033.157.003.767.009.938-.014.153-.02.3-.06.438-.132.3-.156.49-.419.595-.765.052-.172.075-.353.075-.533.002-2.33 0-4.66-.007-6.991a.032.032 0 0 0-.032-.032zm11.784 6.896c0-.014-.01-.021-.024-.022h-1.465c-.048-.001-.049-.002-.05-.049v-4.66c0-.072-.005-.07.07-.07h.863c.08 0 .075.004.075-.074V8.393c0-.082.006-.076-.08-.076h-3.5c-.064 0-.075-.006-.075.073v1.445c0 .083-.006.077.08.077h.854c.075 0 .07-.004.07.07v4.624c0 .095.008.084-.085.084-.37 0-1.11-.002-1.304 0-.048.001-.06.03-.06.03l-.697 1.519s-.014.025-.008.036c.006.01.013.008.058.008 1.748.003 3.495.002 5.243.002.03-.001.034-.006.035-.033v-1.539zm4.177-3.43c0 .013-.007.023-.02.024-.346.006-.692.004-1.037.004-.014-.002-.022-.01-.022-.024-.005-.434-.007-.869-.01-1.303 0-.072-.006-.071.07-.07l.733-.003c.041 0 .081.002.12.015.093.025.16.107.165.204.006.431.002 1.153.001 1.153zm2.67.244a1.953 1.953 0 0 0-.883-.222h-.18c-.04-.001-.04-.003-.042-.04V10.21c0-.132-.007-.263-.025-.394a1.823 1.823 0 0 0-.153-.53 1.533 1.533 0 0 0-.677-.71 2.167 2.167 0 0 0-1-.258c-.153-.003-.567 0-.72 0-.07 0-.068.004-.068-.065V7.76c0-.031-.01-.041-.046-.039H17.93s-.016 0-.023.007c-.006.006-.008.012-.008.023v.546c-.008.036-.057.015-.082.022h-.95c-.022.002-.028.008-.03.032v1.481c0 .09-.004.082.082.082h.913c.082 0 .072.128.072.128V11.19s.003.117-.06.117h-1.482c-.068 0-.06.082-.06.082v1.445s-.01.068.064.068h1.457c.082 0 .076-.006.076.079v3.225c0 .088-.007.081.082.081h1.43c.09 0 .082.007.082-.08v-3.27c0-.029.006-.035.033-.035l2.323-.003c.098 0 .191.02.28.061a.46.46 0 0 1 .274.407c.008.395.003.79.003 1.185 0 .259-.107.367-.33.367h-1.218c-.023.002-.029.008-.028.033.184.437.374.871.57 1.303a.045.045 0 0 0 .04.026c.17.005.34.002.51.003.15-.002.517.004.666-.01a2.03 2.03 0 0 0 .408-.075c.59-.18.975-.698.976-1.313v-1.981c0-.128-.01-.254-.034-.38 0 .078-.029-.641-.724-.998z"/></svg>
+      </a>
+      <a class="nav-icon" href="https://www.dingtalk.com/download?action=joingroup&code=v1,k1,1k7GcVwa5PzZWRaWyBA5OFImW0zNNx1Gj9RkjnuKVGY=" target="_blank" rel="noopener" aria-label="DingTalk">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2m4.49 9.04l-.006.014c-.42.898-1.516 2.66-1.516 2.66l-.005-.012-.32.558h1.543l-2.948 3.919.67-2.666h-1.215l.422-1.763c-.41.087-.815.205-1.223.349 0 0-.646.378-1.862-.729 0 0-.82-.722-.344-.902.202-.077.981-.175 1.595-.257.652-.087 1.338-.172 1.338-.172s-2.555.039-3.161-.057c-.606-.095-1.375-1.107-1.539-1.996 0 0-.253-.488.545-.257s4.101.9 4.101.9S8.27 9.312 7.983 8.99c-.286-.32-.841-1.754-.769-2.634 0 0 .031-.22.257-.16 0 0 3.176 1.45 5.347 2.245s4.06 1.199 3.816 2.228c-.02.087-.072.216-.144.37"/></svg>
+      </a>
+    </div>
+  </div>
+</nav>
+<main class="post">
+  <a class="back-link" href="../">← All posts</a>
+  <article>
+    <header class="post-header">
+      <span class="post-eyebrow">User Story</span>
+      <h1>准确率提升至 90%，阿里商旅基于 AgentScope 构建多智能体差旅助手最佳实践</h1>
+      <div class="post-meta"><time datetime="2026-03-15">March 15, 2026</time><span class="byline">by 秦元锋（阿里商旅 · AliGo）</span></div>
+    </header>
+    <figure class="post-hero"><img src="../../images/blog-alibaba/alibaba-01.jpeg" alt="准确率提升至 90%，阿里商旅基于 AgentScope 构建多智能体差旅助手最佳实践" loading="eager"/></figure>
+    <div class="post-body">
+<blockquote><strong>机构：</strong> 阿里商旅 · AliGo · 多智能体 · Python</blockquote>
+<blockquote><strong>作者：</strong> 秦元锋，AliGo 算法负责人</blockquote>
+<blockquote><strong>原文链接：</strong> <a href="https://mp.weixin.qq.com/s/3MXwawLU716HM5aGARlTXA" rel="noopener">微信公众号原文</a></blockquote>
+<p>阿里商旅是阿里巴巴旗下一站式数智化差旅服务平台。依托阿里巴巴生态强大的供应链及信息数字整合能力，帮助企业实现降本增效，增加合规透明度，全方位提升企业组织效率及员工差旅体验。其中 AliGo 阿里商旅的差旅助手，用户只需要输入确定的行程时间和地点，AliGo 就会自动规划行程为用户推荐合适的交通方式，实现"出差事项收集 → 行程规划 → 一键下单"的完整业务闭环。</p>
+<h2>一、背景</h2>
+<p>阿里商旅早期通过 workflow + 单智能体的模式快速构建并成功上线了 AliGo 系统的第一个版本，然而，在实际使用过程中，我们发现这种模式存在技术瓶颈和架构局限性，亟需进行代码化升级。</p>
+<h3>（一）痛点分析</h3>
+<h4>1. 单智能体模式的技术瓶颈</h4>
+<p>随着业务逻辑复杂度的持续攀升，Prompt Token 数量急剧增长，token 过多，就会导致大模型的注意力机制开始出现明显衰减，无法满足业务对高准确率的核心要求。具体表现为：</p>
+<ul>
+<li><strong>准确性不足：</strong> 以点选需求为例，尽管经过百余次的 Prompt 调优，准确率仍仅维持在 50% 左右。</li>
+<li><strong>稳定性问题：</strong> 线上频繁出现"事项识别异常请重试"、"事项收集结论不输出"等核心问题，严重影响用户体验。</li>
+</ul>
+<h4>2. 架构泛化能力不足</h4>
+<ul>
+<li><strong>协作机制缺失：</strong> 各 Agent 之间缺乏有效的通信机制，导致能力无法复用和协同，扩展性不足。</li>
+<li><strong>规划能力薄弱：</strong> 系统缺乏统一的规划和协调中枢，只能处理单一意图识别，无法应对复杂的多意图融合场景。</li>
+</ul>
+<h4>3. 上下文工程的初级阶段</h4>
+<ul>
+<li><strong>数据结构混杂：</strong> 未有效分离用户视角的对话记录与智能体所需的上下文信息，造成大模型理解负担。</li>
+<li><strong>共享机制缺失：</strong> 缺乏合理的上下文分层机制，不同子智能体间无法实现上下文的有效共享和传递。</li>
+</ul>
+<h3>（二）目标</h3>
+<p>为了解决上述核心痛点，我们启动了 AliGo 代码化架构升级，主要目标包括：</p>
+<ol>
+<li><strong>选型一款适合商旅业务的 AI 框架：</strong> 解决多智能体间的高效通信、协同、能力复用。</li>
+<li><strong>可有效提升大模型业务落地准确率：</strong> 期望通过优化上下文工程、Prompt 工程等，显著提升事项收集准确率及用户体验。</li>
+<li><strong>可有效缓解线上顽疾问题：</strong> 期望通过重构核心业务逻辑流程，解决如"事项收集异常请重试"、"事项总结卡片不出"等长期存在的稳定性问题。</li>
+<li><strong>能支持灵活部署：</strong> 通过容器化、代码化能支持多系统、多模型的灵活部署，满足不同客户的部署需求。</li>
+</ol>
+<h2>二、方案</h2>
+<h3>（一）技术选型</h3>
+<h4>1. 技术栈：Python or Java</h4>
+<p><img src="../../images/blog-alibaba/alibaba-02.jpeg" alt="Python 与 Java 对比" loading="lazy"/></p>
+<p><strong>结论：</strong> 最终采用"Python 写核心 AI 逻辑 + Java 写服务层"的混合模式。用 Python 实现 Agent 核心智能逻辑，包括规划、记忆、LLM 调用；Java 构建外围高并发服务，比如前置的鉴权、MTop 对接、MCP 服务等。</p>
+<blockquote>编者：AliGo 选型时间为 2025 年中旬，目前 AgentScope 已经提供 AgentScope Java，供 Java 开发者选择。</blockquote>
+<h4>2. 智能体框架选型：AgentScope vs LangGraph</h4>
+<p><img src="../../images/blog-alibaba/alibaba-03.png" alt="AgentScope vs LangGraph" loading="lazy"/></p>
+<p>团队对两个框架进行了多个场景的实操和调研，直观感受：对于基础能力，如 MCP 服务调用、与 Qwen LLM 集成时 AgentScope 开箱即用，LangGraph 要额外做一些适配工作等原因，最终选型 AgentScope，原因如下：</p>
+<ul>
+<li>提供实时控制、中断处理、沙箱执行等企业级能力；</li>
+<li>内置 AgentStudio 可视化工具，可以帮助我们获得透明开发体验，掌握智能体开发的全部生命周期；</li>
+<li>对 Qwen 系列模型原生支持。</li>
+</ul>
+<h4>3. Web 框架：FastAPI or Flask</h4>
+<p>Python 主流的 Web 框架主要是 FastAPI（新）和 Flask（老）。</p>
+<p><img src="../../images/blog-alibaba/alibaba-04.png" alt="FastAPI vs Flask" loading="lazy"/></p>
+<p><strong>结论：</strong> 使用 FastAPI，原因如下：</p>
+<ul>
+<li>现代 Web 开发趋势，异步和类型安全是未来，异步处理需求较多；</li>
+<li>性能更好，FastAPI 的类型安全更有助于大型项目维护。</li>
+</ul>
+<h3>（二）Multi Agent 架构</h3>
+<p>基于商旅业务特性，我们尝试了几种常见的 Multi Agent 架构模式。</p>
+<p><img src="../../images/blog-alibaba/alibaba-05.png" alt="Multi Agent 架构模式" loading="lazy"/></p>
+<p><strong>结论：</strong> 基于准确度与耗时的考量，我们采用了"Handoffs（交接模式）+ Routing（纯路由方式）"混合的模式，比如在行程规划、知识库查询的场景下采用 Routing 模式，在信息查询的场景下采用 Handoffs 模式，模式不固定可按需调整。</p>
+<h4>1. 架构图</h4>
+<p>以主规划智能体为核心，协调多个专业化子智能体协同工作，形成完整的差旅规划解决方案。</p>
+<p><img src="../../images/blog-alibaba/alibaba-06.png" alt="整体架构图" loading="lazy"/></p>
+<p><img src="../../images/blog-alibaba/alibaba-07.png" alt="子智能体协作" loading="lazy"/></p>
+<h3>（三）意图识别</h3>
+<p>意图识别智能体的职责如下：</p>
+<ol>
+<li><strong>多意图识别和分类，</strong> 融合上下文对模糊意图进行消歧。</li>
+<li><strong>智能体调度决策，</strong> 基于预定义的触发条件和业务规则，根据识别结果决定调用哪些子智能体，并输出结构化的调用决策。</li>
+<li><strong>query 改写，</strong> 标准化用户口语化的 query 输入，补全上下文信息，提取和重组关键信息。</li>
+<li><strong>显示推理，</strong> 输出的两段式结构（推理过程 + JSON 决策），提升意图识别准确度。</li>
+</ol>
+<p><img src="../../images/blog-alibaba/alibaba-08.png" alt="主智能体+意图识别智能体实现 — Level3 组件图" loading="lazy"/></p>
+<p>在系统运行过程中我们发现了一个性能问题：当用户有明确意图并通过界面操作触发功能时（如点击"为我规划行程"、"为我提申请"、"开始规划"），系统仍需经过大模型的完整分析流程，导致不必要的延迟。</p>
+<p>我们重新审视了架构设计，提出了分层处理策略：将明确的用户意图通过快速通道直接路由，复杂语义理解仍交由 AI 智能分析。整体就是个"快慢车道"的设计：</p>
+<ul>
+<li><strong>快车道：</strong> 规则引擎，处理那些固定套路的话，比如"为我规划行程"、"为我提申请"、"开始规划"这种，可以直接跳过意图分析直接路由到对应智能体。</li>
+<li><strong>慢车道：</strong> 大模型分析，处理那些复杂的、长句子、多意图的请求。</li>
+</ul>
+<p><img src="../../images/blog-alibaba/alibaba-09.png" alt="第二阶段的主智能体+意图识别架构" loading="lazy"/></p>
+<p>核心的设计在于主智能体的动态 Prompt 生成机制。主智能体（<code>main_plan_agent</code>）并不是简单地调用规则引擎或 LLM 意图识别，而是根据规则引擎的 <code>classify()</code> 结果动态选择不同的处理路径：</p>
+<pre><code class="lang-python">def get_prompt_main_plan(user_input: str) -&gt; str:
+    # 运行时决策：根据规则引擎结果动态选择 Prompt 模板
+    rule_match_result = classifier.classify(user_input)
+    if rule_match_result:
+        # 规则匹配成功：生成简单意图 Prompt，直接路由到对应智能体
+        return _get_simple_intent_prompt(...)
+    else:
+        # 规则匹配失败：生成复杂意图 Prompt，先调用 intent_recognition_agent
+        return _get_complex_intent_prompt(...)</code></pre>
+<p>在项目初期样本量有限的情况下，为兼顾推理速度与准确率，可采用推理速度快的大模型（如 Qwen3-Next-80B-A3B-Instruct），通过显式输出其推理逻辑，有效提升意图识别的准确性。商旅应用场景：意图识别、日期时间转化。</p>
+<h3>（四）实时思考链 &amp; 流式输出</h3>
+<p>引入多智能体架构模式不可避免地增加了整体响应耗时，因此我们通过设计实时思考链动态展示各智能体的推理与协作过程，来缓解用户在等待最终结果时的焦虑感。</p>
+<p><img src="../../images/blog-alibaba/alibaba-10.png" alt="流式输出+实时思考链实现 — Level3 组件图" loading="lazy"/></p>
+<h4>1. ReActAgent</h4>
+<p>该智能体是一种基于"思考（Reason）— 行动（Act）— 观察（Observation）"循环架构的系统，深度融合大语言模型的推理能力与外部工具调用能力，通过交替生成推理轨迹与执行动作高效完成复杂任务。</p>
+<p>在 AgentScope 中，其核心由两个抽象方法 <code>_reasoning</code> 和 <code>_acting</code> 构成，并通过钩子机制（Hooks）在推理、执行等关键节点注入自定义逻辑，从而支持实时引导、并行工具调用、结构化输出等高级功能。</p>
+<ul>
+<li><strong>推理过程（<code>_reasoning</code>）：</strong> 调用大语言模型生成下一步行动方案；支持流式输出以实时呈现思考链；并能自动将纯文本响应解析为结构化的工具调用格式。</li>
+<li><strong>执行过程（<code>_acting</code>）：</strong> 支持工具的并行或串行调用；统一处理执行结果并持久化至内存上下文；同时提供中断响应与错误恢复机制。</li>
+</ul>
+<pre><code class="lang-python">observation = initial_user_input
+history = []
+
+while True:
+    # 调用大语言模型，基于当前观察和历史生成思考与行动
+    thought, action, action_input = llm_agent.reason_and_act(observation, history)
+
+    if action == &quot;Finish&quot;:
+        # 任务完成，输出最终答案
+        return thought  # 即最终回答
+    else:
+        # 执行工具调用
+        result = execute_tool(action, action_input)
+        # 将工具结果作为新的观察
+        observation = result
+        # 记录本轮推理与执行到历史
+        history.append((thought, action, result))</code></pre>
+<h4>2. ReActAgent Hook</h4>
+<p>通过前置打印钩子函数（print hook），可在 Agent 执行过程中实时拦截每一条生成的消息；当捕获到 <code>tool_use</code> 类型消息时，自动调用 <code>add_tool_use</code>，而检测到 <code>tool_result</code> 类型消息时，则触发 <code>add_tool_result</code>，从而实现对工具调用及其结果的细粒度追踪与状态同步。</p>
+<pre><code class="lang-python"># 在 _react_agent.py 中的 _acting 方法实现了工具调用的实时返回
+async def _acting(self, tool_call: ToolUseBlock) -&gt; Msg | None:
+    # 创建工具结果消息容器
+    tool_res_msg = Msg(...)
+
+    try:
+        # 执行工具调用，返回 AsyncGenerator
+        tool_res = await self.toolkit.call_tool_function(tool_call)
+
+        response_msg = None
+        # 异步迭代处理工具响应块
+        async for chunk in tool_res:
+            # 实时更新工具结果
+            tool_res_msg.content[0][&quot;output&quot;] = chunk.content
+
+            # 实时打印输出（除非是完成函数且成功执行）
+            if (tool_call[&quot;name&quot;] != self.finish_function_name or
+                not chunk.metadata.get(&quot;success&quot;)):
+                await self.print(tool_res_msg, chunk.is_last)
+
+                # 处理中断
+                if chunk.is_interrupted:
+                    raise asyncio.CancelledError()
+
+                # 返回最终响应消息
+                if (tool_call[&quot;name&quot;] == self.finish_function_name and
+                    chunk.metadata and chunk.metadata.get(&quot;success&quot;)):
+                    response_msg = chunk.metadata.get(&quot;response_msg&quot;)
+
+        return response_msg</code></pre>
+<pre><code class="lang-json">[
+  {
+    &quot;type&quot;: &quot;tool&quot;,
+    &quot;id&quot;: &quot;{id}&quot;,
+    &quot;name&quot;: &quot;query_tool&quot;,
+    &quot;input&quot;: {
+      &quot;question&quot;: &quot;什么是差标管控&quot;
+    }
+  }
+]</code></pre>
+<pre><code class="lang-json">[
+  {
+    &quot;type&quot;: &quot;result&quot;,
+    &quot;id&quot;: &quot;{id}&quot;,
+    &quot;name&quot;: &quot;query_tool&quot;,
+    &quot;output&quot;: [
+      {
+        &quot;type&quot;: &quot;text&quot;,
+        &quot;text&quot;: &quot;问题: 什么是差标管控\n\n搜索结果:\n\n1. 相似度: N/A\n\n在阿里商旅出差审批单中，预算与差标的区别如下：\n- 预算是指本次差旅出行的整体预算费用。\n- 差标是指本次差旅形成中，出行人乘坐飞机以及入住酒店等差旅类目的费用标准。&quot;
+      }
+    ]
+  }
+]</code></pre>
+<pre><code class="lang-python">ReActAgent.register_class_hook(&#x27;print&#x27;, &#x27;task_print_hook&#x27;, task_print_hook)</code></pre>
+<h4>3. TaskCollector</h4>
+<p><code>TaskCollector</code> 是一个自定义任务状态收集器，核心职责是统一管理思考链状态信息。其主要功能包括：管理任务的完整生命周期（PENDING、DOING、DONE、FAILED）、维护任务间的层级关系、通过发布-订阅模式实时推送状态更新，以及管理任务队列与订阅者列表。</p>
+<p>关键方法涵盖：</p>
+<ul>
+<li><code>add_use()</code> 用于添加工具调用任务。</li>
+<li><code>add_result()</code> 用于记录工具执行结果。</li>
+<li><code>subscribe()</code> / <code>unsubscribe()</code> 实现灵活的订阅管理机制。</li>
+</ul>
+<h4>4. 流式输出层</h4>
+<p>该模块的核心职责包括：</p>
+<ol>
+<li>创建 <code>TaskCollector</code> 实例以统一管理任务状态。</li>
+<li>订阅任务状态更新，具体为监听 <code>task_update</code> 类型消息以实时渲染思考链，并监听 <code>text</code> 类型消息以展示最终回答。</li>
+<li>处理智能体执行结果，包括收集最终回答内容和维护卡片数据与任务的映射关系。</li>
+<li>最后，构建结构化的最终响应并生成符合 SSE 格式的输出流。</li>
+</ol>
+<h4>5. 一句话经验</h4>
+<blockquote>基于 ReAct 智能体在调用工具时暴露的 hook，可构建实时推理链（Chain-of-Thought），通过逐步展示智能体的思考与行动过程，有效缓解用户在等待最终结果时的焦虑感。</blockquote>
+<h3>（五）上下文工程</h3>
+<p>核心上下文技术架构：</p>
+<ul>
+<li>全局上下文管理</li>
+<li>会话记忆管理</li>
+<li>动态 Prompt（状态机）</li>
+<li>工具注册管理</li>
+</ul>
+<p><img src="../../images/blog-alibaba/alibaba-11.png" alt="上下文工程 — Level3 组件图" loading="lazy"/></p>
+<h4>1. 记忆架构设计</h4>
+<p>通过出入栈的方式维护智能体调用链的层级关系以及共享 <code>sessionId</code> 来实现模块间的记忆共享。主要解决以下三个核心问题：</p>
+<ol>
+<li><strong>模块独立性：</strong> 保持各模块的独立性，便于维护和扩展。</li>
+<li><strong>模块间记忆共享：</strong> 不同智能体模块（如审批记忆和事项收集记忆）之间的数据共享。</li>
+<li><strong>完整的执行链路追踪：</strong> 提供完整的请求追踪和上下文管理。</li>
+</ol>
+<p><img src="../../images/blog-alibaba/alibaba-12.png" alt="会话记忆架构 — Level3 组件图" loading="lazy"/></p>
+<h4>2. 数据表关系</h4>
+<ul>
+<li><strong>消息存储表：</strong> 用于存储详细的消息记录；</li>
+<li><strong>会话管理表：</strong> 用于管理会话的基本信息和会话描述；</li>
+<li><strong>对话记录表：</strong> 用于存储精简的对话记录，主要记录用户查询和智能体的最终回答。</li>
+</ul>
+<h4>3. 记忆共享</h4>
+<p>为确保智能体（Agent）的独立性与数据隔离，系统默认采用各智能体独立管理自身对话历史的设计；然而，在复杂的多智能体协作场景中，用户体验的连续性至关重要。为此，我们引入上下文共享机制，对高相关性的智能体动态开放必要的上下文信息，从而实现对话的无缝流转与状态同步，在保障隔离性的同时兼顾协作效率与体验一致性。</p>
+<p><img src="../../images/blog-alibaba/alibaba-13.png" alt="记忆分层与共享 — Level3 组件图" loading="lazy"/></p>
+<h4>4. 一句话经验</h4>
+<blockquote>AgentScope 框架提供了标准化的上下文格式，在技术实现上以业务关系驱动智能体间的记忆复用，并基于最小权限原则动态供给各智能体所需的上下文信息，在有效降低上下文规模的同时，显著提升模型推理的准确度与效率。</blockquote>
+<h3>（六）Prompt 工程（工程与智能体结合）</h3>
+<p>我们此前将业务流程、规则及工具调用规范全部嵌入 Prompt 中，虽保证了整体性，但其结构本质上是一个线性的"工作流程说明书"，难以适配用户非线性、动态变化的对话需求。同时，要求模型在全量业务规则基础上实时推理用户当前状态，对其能力要求会非常高。</p>
+<p>为此，我们转而采用动态 Prompt 组装机制，本质上为 AI 构建了一个状态机：通过工程手段结合自然语言理解与程序化状态控制，精准识别用户所处的对话阶段，并将模型注意力聚焦于当前主链路，从而打造出一个鲁棒性更强、更智能的对话 Agent。</p>
+<p><img src="../../images/blog-alibaba/alibaba-14.png" alt="事项收集智能体（工程与智能体结合实践）— Level3 组件图" loading="lazy"/></p>
+<h4>一句话经验</h4>
+<blockquote>在工程实践中，应协同模型共同确定当前及下一轮对话的注意力焦点，并据此明确业务边界；在此可控范围内，交由 AI 自主处理逻辑细节，从而在工程确定性与 AI 灵活性之间实现有效平衡。</blockquote>
+<h2>三、周边生态</h2>
+<h3>（一）知识库</h3>
+<p>在 AliGo 多智能体架构中，为了给各个企业提供内部知识检索能力，也为了支持差旅场景的专业问答（差旅政策、申请单规则、企业制度等），我们构建了一套完整的企业级知识库系统，具备以下核心能力：</p>
+<ol>
+<li><strong>支持 AliGo 快速集成：</strong> 通过标准化 API 接口，让 RAG 子智能体能够快速接入知识库检索能力。</li>
+<li><strong>图文混排文档处理：</strong> 支持差旅政策等复杂文档的图片识别、切分与渲染，保证检索结果的完整性。</li>
+<li><strong>支持本地化部署：</strong> 满足企业客户数据安全和私有化部署需求，提供完整的容器化部署方案。</li>
+<li><strong>多企业隔离：</strong> 支持千人千面场景，不同企业请求自动映射到对应的企业知识库。</li>
+</ol>
+<h4>1. 技术选型</h4>
+<p><strong>一、方案对比</strong></p>
+<p>我们调研了市面上的两种成熟的方案：</p>
+<p><img src="../../images/blog-alibaba/alibaba-15.png" alt="知识库方案对比" loading="lazy"/></p>
+<p><strong>二、选型结论</strong></p>
+<p>最终选择 MaxKB 作为基础框架，主要原因：</p>
+<ol>
+<li><strong>技术栈匹配：</strong> Python + PostgreSQL，与 AliGo 技术栈一致。</li>
+<li><strong>功能完善且符合诉求：</strong> 支持文档解析、向量检索、多模型对接。</li>
+<li><strong>快速落地：</strong> 开源成熟，二次开发成本低。</li>
+<li><strong>社区活跃：</strong> GitHub 19k+ stars，持续维护。</li>
+</ol>
+<h4>2. 架构设计</h4>
+<p><img src="../../images/blog-alibaba/alibaba-16.png" alt="知识库架构图" loading="lazy"/></p>
+<h3>（二）观测</h3>
+<p>在 AliGo 多智能体系统迭代过程中，我们面临着三大核心观测挑战：</p>
+<ol>
+<li><strong>问题定位困难：</strong> 多智能体调用链路复杂，涉及主规划、意图识别、行程规划、信息查询、RAG 知识库等 10+ 个智能体的协作。当用户反馈问题时，难以快速定位是哪个智能体、哪次 LLM 调用或工具调用出现了问题。</li>
+<li><strong>性能优化缺乏数据支撑：</strong> 无法直观看到每个智能体的响应时间、Token 消耗、工具调用频次等关键指标，难以进行针对性技术优化。</li>
+<li><strong>效果评估缺少量化指标：</strong> 迭代过程中缺乏完整的对话日志和结构化数据，无法进行 A/B 测试和效果对比，难以量化评估优化效果。</li>
+</ol>
+<p>为了解决上述痛点，我们尝试构建完整的 AI 应用可观测性体系，核心目标包括：</p>
+<ol>
+<li><strong>全链路追踪：</strong> 从用户输入到最终输出，追踪完整的智能体调用链路，包括 LLM 调用、工具使用、记忆管理等所有环节。</li>
+<li><strong>多维度观测：</strong> 支持 Trace（单次对话）、Session（会话）、User（用户）三个维度的日志查询和分析。</li>
+<li><strong>打通观测-评测流程：</strong> 通过结构化的追踪数据，为测评平台提供标准化输入，实现观测与评测的闭环。</li>
+<li><strong>支持问题快速定位：</strong> 通过可视化的调用链路和详细的输入输出日志，快速定位线上问题根因。</li>
+</ol>
+<h4>1. 技术选型</h4>
+<p>在 LLM 应用开发和监控领域，主要的可观测性平台是 Langfuse（开源）和 LangSmith（商业）。</p>
+<p><img src="../../images/blog-alibaba/alibaba-17.png" alt="Langfuse vs LangSmith" loading="lazy"/></p>
+<p><strong>选型结论：</strong> 经综合评估，Langfuse 在开源透明、数据安全、成本控制和可扩展性方面具有更具优势，完全满足商旅 SaaS + 本地化部署的诉求，是构建可控、可靠的 LLM 应用监控平台的最佳选择。</p>
+<h4>2. 架构设计</h4>
+<p><img src="../../images/blog-alibaba/alibaba-18.png" alt="观测平台架构图" loading="lazy"/></p>
+<h3>（三）评测</h3>
+<p>在阿里商旅行程规划系统中，AI 测评系统作为质量保障的核心基础设施，为多智能体系统的输出结果提供自动化、智能化的评测能力。随着智能体能力的不断迭代升级，我们需要一套完整的测评体系来确保每次发布的质量稳定性，因此构建了这套 AI 测评系统，具备以下核心能力：</p>
+<ol>
+<li><strong>智能化评测：</strong> 基于通义千问大模型的自动评分能力，主要从准确性和相关性两个大的维度对 AI 智能体输出进行评估。</li>
+<li><strong>完整的测试生命周期管理：</strong> 支持测试任务、测试用例、测试数据的全流程管理，实现测试资产的沉淀和复用。</li>
+<li><strong>可视化报告分析：</strong> 自动生成详细的测试报告，包含多维度评分统计、成功率分析、问题归因等，支持版本对比。</li>
+</ol>
+<h4>1. 架构设计</h4>
+<p><img src="../../images/blog-alibaba/alibaba-19.png" alt="测评平台架构图" loading="lazy"/></p>
+<h2>四、效果</h2>
+<ul>
+<li>事项收集准确率从原来的 50% 提升到 <strong>90%+</strong>。</li>
+<li>升级前不可解决的 bug 列表，通过版本升级 100% 解决。</li>
+<li>试用日志从 12 月代码化版本上线后，体感和指标都逐步变好。</li>
+<li>有幸获得了 <strong>InfoQ 2025 年度 AI Agent 最具生产力产品/应用/平台</strong>。</li>
+<li>阿里商旅 AI 解决方案有幸荣获量子位颁发的 <strong>2025 人工智能年度杰出解决方案奖</strong>认可。</li>
+</ul>
+<h2>五、未来规划</h2>
+<p>传统的迭代依赖人工复盘和手动调优的方式效率低、响应慢，难以支撑系统持续进化。后续，我们会持续通过冷启动优化、主动发现异常、引入 Prompt 优化智能体等构建一套多智能体自进化（Self-Evolving Agent System）方案，驱动阿里商旅向更智能、更敏捷、更可靠的方向升级。</p>
+<hr/>
+<blockquote>AgentScope 是通义实验室开源的企业级智能体开发框架，提供智能体编排、工具调用与评测等核心能力，并原生支持智能体微调，助力开发者快速搭建企业级 Agent 系统。目前在 GitHub 已经有 16k 的 star，欢迎大家关注使用 AgentScope 探索并沉淀多智能体最佳实践。<https://github.com/agentscope-ai></blockquote>
+    </div>
+  </article>
+</main>
+<footer class="blog-footer">
+  <p>
+    <a href="../../">agentscope.io</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/agentscope-ai" target="_blank" rel="noopener">GitHub</a>
+    &nbsp;·&nbsp;
+    <a href="https://docs.agentscope.io" target="_blank" rel="noopener">Docs</a>
+    &nbsp;·&nbsp;
+    <a href="../../blog/">Blogs</a>
+    &nbsp;·&nbsp;
+    <a href="../../community/">Community</a>
+    &nbsp;·&nbsp;
+    Built with care by the AgentScope team
+  </p>
+</footer>
+
+<script>
+(function(){
+  const nav = document.getElementById('nav');
+  if (!nav) return;
+  const toggle = nav.querySelector('.nav-toggle');
+  if (!toggle) return;
+  const setOpen = (open) => {
+    nav.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+  };
+  toggle.addEventListener('click', () => setOpen(!nav.classList.contains('open')));
+  nav.querySelectorAll('.nav-links a, .nav-links .nav-icon').forEach(el => {
+    el.addEventListener('click', () => setOpen(false));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && nav.classList.contains('open')) setOpen(false);
+  });
+})();
+</script>
+<script src="../../assets/js/analytics.js" defer></script>
+</body>
+</html>
