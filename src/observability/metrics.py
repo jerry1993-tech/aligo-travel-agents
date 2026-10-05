@@ -138,8 +138,59 @@ RATE_LIMITED_TOTAL: Final[Counter] = Counter(
 #:
 #: 动作取值（见 :mod:`src.orchestration.reply_guard`）：
 #:
-#:     clean                  正文本来就干净，什么都没改
-#:     stripped               剥掉了开头/结尾的草稿段
+#:     clean                  守卫**一字未改**地放过了正文事件（DELTA 拼接）。
+#:                            ⚠️ 它描述的是「守卫有没有动手」，不是「上屏文本
+#:                            一定像样」：形状表外的候选（见
+#:                            ``residual_internal_marker``）与 ``TEXT_BLOCK_END``
+#:                            覆盖载荷里的候选都可以与它并存 —— 那两件事各有
+#:                            自己的指标，刻意不挤进 clean 的口径
+#:                            （2026-10-05 与 ``stripped_internal_marker``
+#:                            的互斥是另一回事：两者都描述「改没改」）。
+#:     stripped               正文与模型原文不同：剥掉了开头/结尾的草稿段，
+#:                            和/或**正文通道**（含 ``TEXT_BLOCK_END`` 覆盖
+#:                            载荷）里的内部标记 —— 只洗了标记时本动作与
+#:                            ``stripped_internal_marker`` 同时记。
+#:                            ⚠️ 它只覆盖正文通道：仅思考链/工具载荷被清洗的
+#:                            回复不记它（那两条通道改的不是正文）。
+#:     stripped_internal_marker
+#:                            混进上屏文本的框架内部标记（如
+#:                            ``[tool_result cleared by postprune]``）已剥除
+#:                            （2026-10-05 缺陷 E 新增）。**七条上屏且落库的
+#:                            通道都记这里**：正文文本块、思考链（``ThinkingBlock*``
+#:                            同样实时上屏且落库）、``TEXT_BLOCK_END`` 的
+#:                            覆盖载荷、工具的两条增量通道（调用参数 /
+#:                            返回文本 —— 按流「留尾」缓冲，跨 delta 分片的
+#:                            标记在配对 End 事件处整段结算，见
+#:                            ``reply_guard._feed_tool_stream``）、工具名
+#:                            （``tool_call_name``：模型可写、前端当执行链标题、
+#:                            还随 ``ToolCallBlock``/``ToolResultBlock`` 落库，
+#:                            同一个名字在调用块与结果块各记一次）、
+#:                            ``DataBlockStartEvent`` 的 ``name``/``media_type``、
+#:                            ``HintBlockEvent.hint``（``str`` 或
+#:                            ``TextBlock`` 列表都洗；后三条通道由第四轮对抗
+#:                            验证的 completeness critic 补上）。剥法是
+#:                            接缝级（只吃标记两侧空白，不动行文）。任一通道
+#:                            剥过标记的轮次**不再记 clean**（clean 的语义是
+#:                            「一个字符都没改」）。工具名与 ``name``/
+#:                            ``media_type`` 走**宽判据**：半截标记头也整名
+#:                            清空（受控短标识，不存在误伤真内容的问题）。——
+#:                            「模型开始复读标记」这件事全靠它可见：标记
+#:                            本身被删掉了，正文与日志里都留不下痕。
+#:     residual_internal_marker
+#:                            **上屏文本里仍有**形状表外的标记候选
+#:                            （``[… cleared up …]`` / ``【…】`` 这类词表外、
+#:                            括号外变种），**只计数不删**（2026-10-05 对抗
+#:                            验证 F7 新增；此前模块文档误称这类变种会落进
+#:                            ``draft_paragraph_left_*``，实测不成立）。
+#:                            扫描覆盖**五条已发出通道**：正文、思考链、END
+#:                            覆盖载荷、工具载荷（含结尾处确信的半截标记头 ——
+#:                            载荷属执行链可见性，不扣尾、只计数）、
+#:                            ``HintBlockEvent.hint`` 文本；另加两处剥离前
+#:                            就已知的补记：内容超长的成对 system 标签、
+#:                            回复结束时仍扣在手里的确信族半截前缀。
+#:                            ⚠️ 同一个碎片**只记一笔**（随文本上屏的由扫描
+#:                            数，显式那一笔只在扫描认不出该形状时补）。
+#:                            它抬头 = 该扩形状表了；和 WARNING 日志配套
 #:     dropped_tool_round_narration / dropped_tool_round_other
 #:                            工具轮的文字整轮丢弃，按**形状**分两类：
 #:                            narration = 判据（草稿 / 占位话术）认得它，

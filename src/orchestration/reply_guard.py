@@ -5,9 +5,43 @@
     实现 ``ReplyGuardMiddleware``。它只挂在**唯一直接面向用户**的智能体
     （``main_plan``）上，做三件事：
 
-    1. **剥离草稿**：工具轮里的过程性叙述（「我先查一下差标」「已让政策问答
-       智能体检索制度原文，稍等」）以及正文开头的内心独白段，不进用户可见
-       的回复；
+    1. **剥离草稿与内部标记**：工具轮里的过程性叙述（「我先查一下差标」
+       「已让政策问答智能体检索制度原文，稍等」）以及正文开头/结尾的内心
+       独白段，不进用户可见的回复；混进正文的**框架内部标记**
+       （``[tool_result cleared by postprune]`` 这类，缺陷 E）就地剥除 ——
+       清洗覆盖**七条上屏且落库的通道**，每条都按「先拼完整、再洗」做，
+       流式分片拦腰截断标记的旁路已被堵死（2026-10-05 对抗验证 P5；后三条
+       通道由同日第四轮对抗验证的 completeness critic 补上）：
+
+           · 正文文本块 —— 整轮缓冲，``MODEL_CALL_END`` 结算
+             （:meth:`ReplyGuardMiddleware._settle_round`）；
+           · **思考链** —— 按块缓冲，``THINKING_BLOCK_END`` 结算
+             （:meth:`ReplyGuardMiddleware._settle_thinking`）；
+           · ``TEXT_BLOCK_END`` 的**覆盖载荷** —— 它会在服务端盖掉块内容，
+             单独判（同 ``_settle_round``，标记藏在载荷里时不许复用旧事件）；
+           · **工具的两条 delta 通道**（调用参数 / 返回文本）——
+             按流「留尾」缓冲：保留最近 :data:`_TOOL_STREAM_HOLDBACK`
+             个字符，配对 End 事件到达时整段结算
+             （:meth:`ReplyGuardMiddleware._feed_tool_stream`）；
+           · **工具名** ``tool_call_name``（模型可写、前端当执行链标题、
+             还随 ``ToolCallBlock``/``ToolResultBlock`` 落库）与
+             ``DataBlockStartEvent`` 的 ``name``/``media_type`` ——
+             受控短标识，走**宽判据**：半截标记头也整名清空
+             （:func:`_scrub_tool_call_name` / :func:`_scrub_named_fields`）；
+           · **``HintBlockEvent.hint``**（``str`` 或 ``TextBlock`` 列表）——
+             提示块同样上屏且落库（:func:`_scrub_hint_event`），
+             洗过的文本进残留扫描
+
+       ⚠️ **块边界是另一条缝**（同日第三/四轮）：思考块按块结算、正文按轮
+       结算，标记被边界拦腰截断时两半会各自通过清洗、拼起来才是完整标记。
+       结算时把「像标记开头」的尾段**扣在手里**接到下一段一起判
+       （:func:`_pending_marker_prefix_start`，在**未清洗的原文**上求），
+       工具载荷与扣留之间还有**跨通道缝合**（:func:`_first_marker_span`）。
+       ⚠️ **扣留宽、删除窄**：扣留用宽判据（任意未闭合方括号头 / 任意
+       ``<system-*>`` 标签头，含裸 ``<``）且**永不删除** —— 最坏代价只是
+       「内容归属挪到下一块」；删除只用窄判据（⊆ 清洗器剥得掉的形状），
+       且只在**回复结束**时给扣留定性（:func:`_is_confident_marker_head`：
+       确信族丢弃 + 计残留 + WARNING，宽族原样按内容发出 + 进残留扫描）。
     2. **兜住空回复**：当一整轮回复只剩草稿（用户什么答案都拿不到）时，
        给模型一次改正机会；重试用尽仍不行，发一段**诚实**的兜底话术，
        绝不让用户面对空白；
@@ -24,7 +58,8 @@
 为什么要做这件事（不是洁癖，是四个实测到的产品缺陷）
 ═══════════════════════════════════════════════════════════════════════════════
 
-下面四段都是 **2026-10-03 实测**抓到的真实回复（探针 8 轮 ×2 个问题）：
+下面几段都是实测抓到的真实回复（A–D 来自 **2026-10-03** 的探针
+8 轮 ×2 个问题；E 来自 **2026-10-05** 的线上工单）：
 
     A. 工具轮前言被拼进正文
        「I'll wait for the policy agent's report.\\n\\n住宿标准：**单晚不超过
@@ -45,6 +80,21 @@
        ⚠️ 后一句**不是**本模块认得的草稿（``_is_draft`` 为假，实测），
        所以它既不在剥离范围、也不进 ``draft_paragraph_left_*`` 计数 ——
        它是「本模块还没有判据的那种形状」的样品，别把它当成计数示例。
+
+    E. 内部标记泄漏（2026-10-05，线上工单）
+       「[tool_result cleared by postprune]
+
+        好的，杭州两天出差。还差两个信息：
+
+        **你从哪个城市出发？**」
+       ——模型把 agent 框架「工具结果已清理」的标记**当作正文复读**了
+       出来。当时没有任何一条判据认得它，于是原样上屏。该字符串**不在**
+       本仓库、全部依赖、上游 AgentScope 四个时间点快照（2.0.8@Sep22/
+       Sep25、2.0.10dev@Sep28/Sep30）里 —— 2026-10-05 逐个快照核查，零
+       命中。它是模型侧对训练数据里同类框架标记的复读（同族标记公开
+       存在于 QwenLM/qwen-code 的 ``microcompact.ts``：``[Old tool result
+       content cleared]``，换了个机制名复现）。处置见
+       :func:`_strip_internal_markers`。
 
 这些不是「风格问题」：B/C 是**用户拿不到答案**，A/D 是**信息泄露**
 （内部工具名、智能体名、系统状态）。提示词能降低发生率，但**降到 0 不是
@@ -129,9 +179,77 @@
   ⚠️ 结尾剥离是 2026-10-04 补的（对抗审计的 C3）：补之前尾部独白会原样
   发给用户，而且因为正文已经发出、**不会触发重说**，刷新页面还在。
   见 ``_strip_drafts`` 的 docstring。
+- **内部标记的清洗只认形状表**（:func:`_strip_internal_markers`，2026-10-05
+  缺陷 E）：方括号里「工具/结果词 + 清理动词」的组合、``cleared by
+  <机制名>`` 句式、成对或残缺的 ``<system-*>`` 标签。中文括号（``【】``）、
+  全角圆括号（``（）``）与普通 markdown 链接**刻意不剥** —— 它们在差旅
+  语境里太常见，误伤真答案的代价大于漏掉一个变种标记；但「不剥」不等于
+  「沉默放行」：这些括号里的候选同样进下面的残留计数。表外的候选由
+  :func:`_residual_marker_count` 在 ``_report`` 里**只计数不删**，扫描
+  覆盖五条已发出通道（正文、思考链、``TEXT_BLOCK_END`` 覆盖载荷、工具
+  载荷 —— 含结尾处确信的半截标记头、``HintBlockEvent.hint`` 文本），
+  另加两处**剥离前就已知**的补记（``residual_precount``：超长成对
+  ``system`` 标签、回复结束时仍扣在手里的确信族半截前缀），记
+  ``residual_internal_marker`` 指标 + WARNING，按数据决定要不要扩表。
+  ⚠️ 同一个碎片**只记一笔**：随文本上屏的由扫描数，显式那一笔只在扫描
+  认不出该形状时补（实测过的双计：``[tool_result clea`` 曾被数成
+  「工具载荷 2 处」）。
+  ⚠️ **工具通道按流留尾缓冲（2026-10-05 对抗验证 P5 的修复）**：逐片
+  就地洗会被流式分片绕过 —— ``'{"note": "[tool_result clea'`` +
+  ``'red by postprune]"}'`` 两片各自干净、拼起来完整标记**同时上屏与
+  落库**。现在保留最近 512 字符，标记收全的那一刻必然整处落在缓冲里；
+  代价是工具载荷的上屏最多延迟 512 字符（超过它就开始逐段放出）。
+  512 < ③ 号模式 4000 字符的内容上限 —— 一段内容超长的成对 ``<system*>``
+  标签跨在切口上时洗不掉（理论上限 4400 字符），这是刻意取舍：
+  工具载荷里出现这种形状属理论情形，而洗不掉的候选会进 ``tool_residual``
+  计数，不会无声。
+  ⚠️ **这个计数器是 2026-10-05 对抗验证补上的（F7）**：在此之前模块文档
+  声称「表外的变种会落进 ``draft_paragraph_left_*`` 计数」—— 实测**不
+  成立**（``[tool result removed to save space]`` 这类配工具名词的变种，
+  ``_is_draft`` 与 ``_classify_suspicious_paragraphs`` 对它全为假，整轮
+  被记成 ``clean``，复读标记完全不可见）。同一轮对抗验证发现并已修的
+  还有：全文重写破坏远端 markdown 的缩进/硬换行（F1，已改为**接缝级**
+  缝合 :func:`_splice_marker_out`，只吃标记两侧的空白、不动行文）、
+  ② 句式无名词要求误删 ``[Luggage cleared by customs at 14:30]``（F2，
+  已加名词/机制名要求）、动词裸词干误删 ``[Results: clear]`` / ``[Results
+  clearly show option B]``（F3，已改用**完整屈折形式**的动词表 + ``\b``，
+  不认裸 ``clear``）、嵌套标记单趟不收敛（F8，已改为到不动点循环）、
+  ``<system-*>`` 内容超 600 字即整段绕过（F9，已加宽边界并改
+  ``[\\s\\S]``）、思考链与 ``TEXT_BLOCK_END`` 载荷两条旁路（F4/F5，见
+  :func:`_settle_thinking` 与 :func:`_settle_round`）。
+  ⚠️ **2026-10-05 第二轮对抗验证（over-strip 维度）又发现并修复四处**：
+  「每趟只删一处、删一处就全文重扫」的超线性复杂度（P1，开标签 ×1024
+  ／17 KB 退化输入实测 **67 秒** —— ×640／10.6 KB 也要 21 秒，等于把
+  事件循环堵死；已改为**每趟批量删完全部非重叠命中再循环**，两个输入
+  分别降到 **0.15 秒 / 0.09 秒**）、独占一行的标记被当段落分隔（P2，tight list
+  变 loose、下一行缩进被吞、端到端触发尾部草稿剥离吞掉真答案；接缝规则
+  已改为**按行缝合** —— 两侧换行合并成一个、保留上一行行尾空格与下一行
+  缩进）、函数结尾的全局 ``strip()`` 吃掉远端首行缩进（P2b，已去掉：
+  首尾空白只在删处贴边时由 :func:`_splice_marker_out` 收拾）、剥完只剩
+  标点的轮次被当可用答复（P3，``[tool_result pruned]。`` 剥完剩一个
+  「。」上屏；``_answer_problem`` 现在把「没有一个 ``\\w`` 字符」判成
+  ``empty``）。
+  ⚠️ **2026-10-05 第三/四轮对抗验证（完整性 critic）又发现并修复一批**
+  （完整清单与取舍见 ``docs/02-技术架构.md`` §3.7「工程上另修九处」）：
+  思考块边界与正文轮边界上的**跨块缝合**（缺口 ①：标记被块边界拦腰截断时
+  两半各自通过清洗、拼起来才是完整标记；现在结算时把「像标记开头」的尾段
+  扣在手里接下一段一起判，见「块边界是另一条缝」）、工具载荷结尾的确信
+  半截头计数（缺口 ③）、异常/取消路径仍要登记扣留前缀（缺口 ④）、
+  ``hint``/``tool_call_name``/``name``/``media_type`` 四条通道补齐
+  （缺口 ②/⑤）、扣留前缀被后续清洗重新删掉（缺口 ⑥）、工具载荷尾碎片
+  双计（自查发现，见上）、宽判据在名字通道误伤受控标识（补齐宽臂）、
+  跨通道缝合（半截标记在工具流、下半截在正文）。两条判据的**方向**是
+  这一轮的核心：**扣留宽、删除窄**（见文件职责第 1 条的 ⚠️）—— 宽判据
+  只搬运、永不删除，窄判据才允许「不发出去」，且只在**回复结束**时对
+  扣留定性。
+  ⚠️ 与段落级剥离的区别：标记是**跨度级**清洗（只删方括号/标签本身），
+  标记与真答案同段时**不会**整段删；剥完只剩标记的轮次走「empty → 重说
+  → 兜底」老路，不会给用户空白。
 - **正文中间的草稿段不处理**（第一段真答案之后夹进来的那些）。
   理由同上：删中间段落会改变行文结构，风险大于收益。这类残留由
   :func:`_classify_suspicious_paragraphs` 计数上报，靠数据决定要不要做下一版。
+  （⚠️ 例外：**内部标记**走跨度级清洗，正文中间也删 —— 删的只是方括号/
+  标签那一小段，不动行文结构。见上一条。）
   ⚠️ **内部实现名字（工具名/智能体名）也走这条**：它出现在正文中间时只
   计数（``draft_paragraph_left_internal`` / ``..._monologue``）不拦截。
   这是个**已知的取舍**，不是遗漏 ——
@@ -159,6 +277,11 @@
   生成完的时间，而不是第一个字的时间。长回复比短回复更明显（实测最终
   答复约 1.2 s / 155 字）。这是「想拦就得先看完」的直接代价，
   要比手感就把 ``ALIGO__ORCHESTRATION__REPLY_GUARD_ENABLED`` 关掉。
+- **思考链同样按块缓冲**（2026-10-05 对抗验证 F4 的修复代价）：思考块
+  在 ``THINKING_BLOCK_END`` 才放行 —— 标记可能跨 DELTA 分片，只有拼完整
+  才洗得干净。代价是前端「实时思考链」的显示延迟到块结束，
+  比正文的整轮缓冲轻（块粒度），但同样是可感知的取舍；
+  不接受就关守卫（同上开关）。
 
 ═══════════════════════════════════════════════════════════════════════════════
 重试机制：为什么可以「吞掉」ReplyEndEvent
@@ -214,7 +337,14 @@ from agentscope.event import (
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
+    ThinkingBlockDeltaEvent,
+    ThinkingBlockEndEvent,
+    ThinkingBlockStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResultEndEvent,
+    ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
 from agentscope.message import HintBlock, Msg, TextBlock
@@ -725,7 +855,7 @@ _RETRY_HINT = """\
 #: 一轮迭代）。点名之后它才知道要回去读工具返回。
 _UNGROUNDED_HINT_TEMPLATE = """\
 <system-reminder>
-你刚才那段答复里出现了差标里**没有依据**的数值：{amounts}。
+你上一个候选答复里出现了差标里**没有依据**的数值：{amounts}。
 
 这些数字没有出现在本轮工具的返回中，**没有发给用户**。
 
@@ -1001,6 +1131,1339 @@ def _split_paragraphs(text: str) -> list[str]:
     """
     blocks = re.split(r"\n\s*\n", text)
     return [block for block in (b.strip() for b in blocks) if block]
+
+
+#: 「内部标记」的形状表（见 :func:`_strip_internal_markers`）。
+#:
+#: ⚠️ 这些标记**不是本仓库生成的**（全仓 / 全部依赖 / 上游 AgentScope 四个
+#: 时间点快照 / uv·pip 缓存全都核查过，零命中）—— 它们是模型对 agent 框架
+#: 「工具结果被清理」标记的**复读**。2026-10-05 线上实测：``main_plan`` 在
+#: 工具轮之后吐出一段以 ``[tool_result cleared by postprune]`` 开头的正文
+#: （见模块文档缺陷 E）。同族标记确实存在于公开的 agent 框架里
+#: （QwenLM/qwen-code 的 ``microcompact.ts``：``[Old tool result content
+#: cleared]`` / ``[Old inline media cleared: ...]``），模型换个机制名复读
+#: 出来完全同形 —— 所以形状表按「名词 + 清理动词」的组合认，而不是钉死
+#: 那一句话。
+#:
+#: ⚠️ 2026-10-05 对抗验证（三个独立 reviewer + 逐条复现）收紧过一轮，
+#: 每一条改动都对应一个实测的**假阳性**或**漏网**：
+#:
+#:   · 动词必须是**带后缀的屈折形式**且两侧有词边界 —— 裸动词/无边界时
+#:     ``[Results: clear]``（名词: 形容词）与 ``[Context unclear]``
+#:     ``[Results clearly show option B]`` 里会命中 ``clear`` 词干，
+#:     整段被删（实测复现）。框架标记从不用裸动词。
+#:   · 名词只认**工具族对象词**（``tool result/output/call/response`` 及其
+#:     content/data/text 尾巴、``inline media``、``media``）。裸的
+#:     ``results`` / ``outputs`` / ``contexts`` 刻意不认：``[Results
+#:     compressed]`` / ``[Output unclear]`` 这类英文标签在真答复里出现得
+#:     出人意料地自然，而「误伤真答案的代价大于漏掉一个变种标记」。
+#:   · ② 的 ``… by <机制名>`` 句式**必须**带机制名 —— 早先「任何
+#:     ``cleared by``」的版本会删掉 ``[Luggage cleared by customs at
+#:     14:30]``、``[Payment cleared by ICBC](url)``（markdown 链接文字被
+#:     删、URL 悬空，实测复现）。
+#:   · ③ 的两个上限（属性 120、内容 600）都被实测绕过过：145 字符的
+#:     ``data-x`` 属性或 601 字的内容会让 ③ 整条不命中，只剩 ④ 删掉标签、
+#:     **内容留在正文里** —— 正是 ③ 存在的意义所在。边界加宽到 400/4000，
+#:     内容字符类换成 ``[\s\S]``（内容里出现 ``<`` 不再整条失配）。
+#: 动词/机制名两侧的**ASCII 边界**（2026-10-05 对抗验证 #2/#29）。
+#:
+#: ⚠️ 不能用 ``\b``：那是 **Unicode** 词边界，CJK 与下划线都算「词字符」，
+#: 两个实测漏网由此而来 ——
+#:
+#:   · ``[tool_result pruned已从上下文移除]``：动词后紧跟 ``已`` 时 ``\b``
+#:     不成立，整条标记**既不剥也不计数**（形状表与残留表同时漏，指标全
+#:     ``clean`` —— 正是这次工单最怕的那种沉默）；
+#:   · ``[tool_result_pruned]``：``_`` 同样是词字符，``pruned`` 左侧的
+#:     ``\b`` 不成立，同族标记换个下划线连接就整个漏掉。
+#:
+#: 改用显式环视：两侧只要不是 ``[A-Za-z0-9]`` 就算边界（``_``/CJK/标点都
+#: 是分隔符），而 ``unpruned`` / ``prunedx`` 这类更长的英文词依旧不误伤。
+_VERB_LEFT_GUARD: Final[str] = r"(?<![A-Za-z0-9])"
+_VERB_RIGHT_GUARD: Final[str] = r"(?![A-Za-z0-9])"
+
+_MARKER_CLEANUP_VERBS: Final[str] = (
+    r"clear(?:ed|ing|s)"
+    r"|prun(?:ed|ing|es)"
+    r"|truncat(?:ed|ing|es)"
+    r"|omitt?(?:ed|ing|s)"
+    r"|elid(?:ed|ing|es)"
+    r"|compress(?:ed|ing|es)"
+    r"|dropp?(?:ed|ing|s)"
+    r"|compact(?:ed|ing|s)"
+    r"|remov(?:ed|ing|es)"
+    r"|shorten(?:ed|ing|s)"
+    r"|summari[sz](?:ed|ing|es)"
+    r"|condens(?:ed|ing|es)"
+    r"|delet(?:ed|ing|es)"
+    r"|discard(?:ed|ing|s)"
+    r"|redact(?:ed|ing|s)"
+    r"|clean(?:ed|ing|s)[\s_]up"
+)
+
+#: 标记族里的「被清理对象」名词（见上面收紧说明：只认工具族，不认裸的
+#: results/outputs/contexts）。``media`` 只认 ``inline media`` 全称 ——
+#: 对抗验证 F3 实测 ``[Media: photo compressed]`` 是**真内容**，裸 media
+#: 会把它整段删掉，故收紧（2026-10-05）。
+_MARKER_NOUNS: Final[str] = (
+    r"tool[\s_]?(?:result|output|call|response)s?"
+    r"(?:[\s_]*(?:content|contents|data|text|blocks?|result|output))*"
+    r"|inline[\s_]+media"
+)
+
+#: 清理机制名 —— ② 句式的锚（机制名不可穷举，所以这里放宽到「像机制名的
+#: 词根」：prune/compact/compress/summarize/cleanup/sanitize/…）。
+_MARKER_MECHANISMS: Final[str] = (
+    r"post[\s_-]?prun\w*"
+    r"|micro[\s_-]?compact\w*"
+    r"|compact\w*"
+    r"|prun\w*"
+    r"|truncat\w*"
+    r"|compress\w*"
+    r"|condens\w*"
+    r"|summari[sz]\w*"
+    r"|clean[\s_-]?up"
+    r"|sanitiz\w*"
+    r"|redact\w*"
+    r"|context[\s_-]?(?:manage\w*|trim\w*|prun\w*|compact\w*)"
+    r"|history[\s_-]?(?:trim\w*|prun\w*|compact\w*)"
+    r"|memory[\s_-]?(?:manage\w*|prun\w*|compact\w*)"
+    r"|token[\s_-]?(?:window|budget|limit)"
+)
+
+#: ① 方括号里的「工具族名词 + 清理动词」标记：
+#:     [tool_result cleared by postprune]（线上原文）
+#:     [Old tool result content cleared]（qwen-code 同族）
+#:     [tool output cleared: 4213 chars] / [tool_result pruned / truncated]
+#:     [Old inline media cleared: image/png]
+#:     名词与动词之间只允许空白/标点（≤8），动词必须是完整屈折形式。
+#: 全角方括号（［］）一并覆盖 —— 模型偶尔输出全角。
+_PATTERN_BRACKET_NOUN_VERB: Final[re.Pattern[str]] = re.compile(
+    r"[\[［]\s*(?:(?:old|previous)[\s_]+)?"
+    r"(?:" + _MARKER_NOUNS + r")"
+    r"[\s_:：,，-]{0,8}?"
+    + _VERB_LEFT_GUARD
+    + r"(?:" + _MARKER_CLEANUP_VERBS + r")"
+    + _VERB_RIGHT_GUARD
+    + r"[^\[\]［］\n]{0,80}?"
+    r"[\]］]",
+    re.IGNORECASE,
+)
+
+#: ② 「<清理动词> by <机制名>」句式兜底：机制名不可穷举，但**必须**是
+#: 机制词根（见上面收紧说明，裸 cleared by 会误删海关/银行等真内容）。
+_PATTERN_BRACKET_VERB_BY: Final[re.Pattern[str]] = re.compile(
+    r"[\[［][^\[\]［］\n]{0,80}?"
+    + _VERB_LEFT_GUARD
+    + r"(?:" + _MARKER_CLEANUP_VERBS + r")\s+by\s+"
+    r"(?:" + _MARKER_MECHANISMS + r")"
+    + _VERB_RIGHT_GUARD
+    + r"[^\[\]［］\n]{0,60}?[\]］]",
+    re.IGNORECASE,
+)
+
+#: ③ 系统级标签泄漏（成对）：``<system-reminder>…</system-reminder>``
+#: 这类标签只该出现在上下文里（框架的注入块/背景工具占位符），出现在
+#: **正文**里就是泄漏。
+#: ⚠️ 开标签的 ``>`` 必须用 ``[^<>]{0,400}?>`` 吃掉（允许属性）——
+#: 漏掉它的话内容段接不上 ``>``（``[^<>]`` 匹配不了 ``>``），整条
+#: 模式永不命中，只剩 ④ 号把标签删掉、**内容留在正文里**。
+_PATTERN_SYSTEM_PAIR: Final[re.Pattern[str]] = re.compile(
+    r"<system[\s_-]*(?:reminder|info|warning|message)\b[^<>]{0,400}?>"
+    r"[\s\S]{0,4000}?"
+    r"</system[\s_-]*(?:reminder|info|warning|message)\s*>",
+    re.IGNORECASE,
+)
+
+#: ④ 系统级标签泄漏（残缺：只有开标签或只有闭标签）—— 同样不能上屏。
+_PATTERN_SYSTEM_LONE_TAG: Final[re.Pattern[str]] = re.compile(
+    r"</?system[\s_-]*(?:reminder|info|warning|message)\b[^<>]{0,400}>",
+    re.IGNORECASE,
+)
+
+_INTERNAL_MARKER_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    _PATTERN_BRACKET_NOUN_VERB,
+    _PATTERN_BRACKET_VERB_BY,
+    _PATTERN_SYSTEM_PAIR,
+    _PATTERN_SYSTEM_LONE_TAG,
+)
+
+#: 去掉 ③（成对标签）后的形状表 —— 供 :func:`_strip_internal_markers` 的
+#: 廉价预筛用：文本里连 ``<system`` 前缀或 ``</`` 都没有时，③ 必然不命中，
+#: 而 ③ 的惰性内容段 ``[\s\S]{0,4000}?`` 对「一堆开标签、零闭标签」的输入
+#: （``"<system-reminder>" × 8192``，139 KB，2026-10-05 对抗验证 #30 实测
+#: 0.98 秒）会把每个 ``<`` 起点都展开到上限才失败。预筛后同一输入只剩 ④
+#: 的线性扫描。
+_INTERNAL_MARKER_PATTERNS_NO_PAIR: Final[tuple[re.Pattern[str], ...]] = (
+    _PATTERN_BRACKET_NOUN_VERB,
+    _PATTERN_BRACKET_VERB_BY,
+    _PATTERN_SYSTEM_LONE_TAG,
+)
+
+#: 形状表**之外**、但仍像标记的残留 —— 只计数、不再删。
+#:
+#: 存在的理由：形状表故意开得窄（见上），窄的代价是「表外的变种会漏」。
+#: 模块文档早先声称漏网变种会落进 ``draft_paragraph_left_*`` 计数 —— 2026-10-05
+#: 对抗验证实测这**不成立**（``_is_draft`` / ``_classify_suspicious_paragraphs``
+#: 对 ``[tool_result cleaned up by the system]`` 全为假，轮次被记成 ``clean``，
+#: 「模型开始复读标记」完全不可见）。这张表把那个承诺补成事实：形状比 ① 宽
+#: （任意名词的方括号 + 清理动词、任意词 + by + 机制名），命中时记
+#: ``residual_internal_marker`` 并留一条 WARNING。
+#:
+#: ⚠️ 刻意**不**用它剥除：宽形状里混着合法内容（``[Luggage cleared by
+#: customs]`` 这类），自动删的误伤风险大于收益。它的产出是「该不该扩形状表」
+#: 的数据依据 —— 这正是模块文档「先靠指标看发生率，再决定要不要做更强的处置」
+#: 的那条路。
+#: 残留计数专用的**更宽**动词表。
+#:
+#: ⚠️ 形状表只认屈折形式（防误删真内容），残留表只计数、不删，所以放宽到
+#: **裸动词也算** —— 2026-10-05 对抗验证 #19/#20 实测 ``[context clean]`` /
+#: ``[cache purge]`` / ``[buffer flush]`` / ``[history trim]`` 这类变体在旧
+#: 表里既不剥也不计数，一个字都没留下痕迹。宽表的代价是误报（``[房间
+#: clean]`` 这类正常文字会被计一笔），所以它只产出一行 WARNING 供「要不要
+#: 扩形状表」判断，绝不改文本。
+_RESIDUAL_CLEANUP_VERBS: Final[str] = (
+    _MARKER_CLEANUP_VERBS
+    + r"|clean(?:ed|ing|s)?"
+    # ⚠️ ``e`` 不能漏：``purg(?:ed|ing|es)?`` 认不出**原形** ``purge``
+    # （2026-10-05 第三轮对抗验证 #19 的补测实测：``[tool_result purge]``
+    # 既不剥也不计）。其余几个动词的原形恰好等于词干，没有这个坑。
+    r"|purg(?:e|ed|ing|es)?"
+    r"|flush(?:ed|ing|es)?"
+    r"|trim(?:med|ming|s)?"
+    r"|evict(?:ed|ing|s)?"
+)
+
+#: 括号类残留的形状（2026-10-05 对抗验证 #3/#20 放宽）：
+#:
+#:   · 括号集合含 ASCII 圆括号 ``()`` 与中文/全角括号 —— 差旅正文里的
+#:     ``(`` 虽常见，但计数不改文本，沉默才是更大的问题；
+#:   · 内部不再禁 ``\n``（跨行候选此前整条漏计）；
+#:   · 尾段上限 80 → 300（``[tool_result pruned（已从上下文移除，共 4213
+#:     字符，详见系统日志第 12 页…）]`` 这类长尾此前漏计）。
+#:
+#: ⚠️ 放宽的**唯一**依据是「这里只计数」，别把它复制到形状表 —— 形状表
+#: 每放宽一格都是真内容被删的风险。
+_RESIDUAL_BRACKET_OPEN: Final[str] = r"[\[［【（(]"
+_RESIDUAL_BRACKET_CLOSE: Final[str] = r"[\]］】）)]"
+_RESIDUAL_BRACKET_BODY: Final[str] = r"[^\[\]［］【】（）()]"
+
+_RESIDUAL_MARKER_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    # 方括号里出现清理动词（名词任意）：[things were cleaned up]
+    # ⚠️ 中文括号（【】）与全角圆括号（（））也认 —— 形状表刻意不剥它们
+    # （见 _strip_internal_markers：差旅正文里太常见，误伤代价大），但
+    # 「既不剥、也不计数」等于**沉默放行**（2026-10-05 对抗验证 P6 实测：
+    # '【tool_result cleared by postprune】' 原样上屏且指标全 clean）。
+    # 计数不改变文本，只把发生率摆上台面。
+    re.compile(
+        _RESIDUAL_BRACKET_OPEN
+        + _RESIDUAL_BRACKET_BODY
+        + r"{0,120}?"
+        + _VERB_LEFT_GUARD
+        + r"(?:" + _RESIDUAL_CLEANUP_VERBS + r")"
+        + _VERB_RIGHT_GUARD
+        + _RESIDUAL_BRACKET_BODY
+        + r"{0,300}?"
+        + _RESIDUAL_BRACKET_CLOSE,
+        re.IGNORECASE,
+    ),
+    # 「… by <机制名>」句式（动词任意，含**不在**上面动词表里的）：
+    # [snippet hidden by microcompaction]
+    # ⚠️ 例句要与判据一致：旧注释举的 ``[cache was dropped by the evictor]``
+    # 其实只命中上面那条（``dropp?`` 在动词表里，``evictor`` 不在机制名表里）
+    # —— 2026-10-05 变异 M33 实测：照那个例句写的隔离样本对「第二模式被删」
+    # 完全不敏感。机制名必须**紧跟在 ``by`` 之后**（没有冠词的位置）。
+    # （括号类同上：中文括号/全角圆括号一并计数。）
+    re.compile(
+        _RESIDUAL_BRACKET_OPEN
+        + _RESIDUAL_BRACKET_BODY
+        + r"{0,120}?"
+        + _VERB_LEFT_GUARD
+        + r"by\s+(?:"
+        + _MARKER_MECHANISMS
+        + r")"
+        + _VERB_RIGHT_GUARD
+        + _RESIDUAL_BRACKET_BODY
+        + r"{0,60}?"
+        + _RESIDUAL_BRACKET_CLOSE,
+        re.IGNORECASE,
+    ),
+    # 半截标记碎片（**行锚**）：开括号 + tool/media 或 ``<system`` 前缀，
+    # 一路到行尾都没有闭合的 ``]`` / ``>``。
+    # ⚠️ 2026-10-05 对抗验证 #28 实测的**静默**漏网：剥除在跨模式重叠的
+    # 输入上可能留下 ``[tool_result pruned`` 这样的半截（真答案被吞 + 碎片
+    # 上屏 + 残留计数为 0）—— 碎片自身不成形状，上面两条模式也认不出。
+    # 只计数；命中的多半是「未闭合的方括号」这类排版噪声，WARNING 里看得见
+    # 就够了。
+    re.compile(
+        r"[\[［【（(](?:(?:old|previous)[\s_]+)?(?:tool|media)(?![A-Za-z0-9])"
+        + _RESIDUAL_BRACKET_BODY
+        + r"{0,300}$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"</?system[\s_-]*(?:reminder|info|warning|message)?[^\n<>]{0,120}$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # 系统标签本身（未被剥掉的形状，计数用）：形状表的 ④ 属性上限 400，
+    # 超长属性的标签两条模式都匹配不到、整段原样上屏。同属「表外变种」，
+    # 只计数、不剥。计数是最后一道可见性 —— 上限放到 1000（比形状表宽一档），
+    # 代价只是一次线性扫描（它同时被 ``</`` 预筛保护）。
+    re.compile(
+        r"</?system[\s_-]*(?:reminder|info|warning|message)\b[^<>]{0,1000}>",
+        re.IGNORECASE,
+    ),
+)
+
+
+#: 接缝两侧的空白字符集（删掉标记后用于只在**删处**收拾空白）。
+#:
+#: ⚠️ 用 :meth:`str.rstrip` 而不是 ``[ \t\n]*\Z`` 的 ``re.search``：后者
+#: 每次都要从串首起试着匹配（实测 64 KB 文本 ×3200 次缝合要 6.9 秒），
+#: 而 rstrip/lstrip 只看接缝那一小段（同输入 0.5 秒）。2026-10-05 对抗
+#: 验证 P1 的同一族问题。
+#: ⚠️ 含 ``\r``（2026-10-05 对抗验证 #4）：CRLF 文本里标记独占一行时，
+#: 两侧分别是 ``"\r\n"`` 与 ``"\r\n"``，缺 ``\r`` 会让 ``l_ws``/``r_ws``
+#: 在 ``\n`` 处截断、``\r`` 被当成行内空白 —— 缝合后剩下孤立的 ``\r`` 与
+#: 压不掉的空行（实测 CRLF 多空行输入缝合后仍留多行）。
+_SEAM_WS: Final[str] = " \t\n\r"
+
+
+def _merge_seam_removal(left: str, right: str) -> str:
+    """把 ``left`` 与 ``right`` 按「删掉中间一段」的接缝规则接起来。
+
+    规则表见 :func:`_splice_marker_out`（本函数就是它的接缝合并部分，
+    拆出来是为了让「整行连前缀一起删」的分支复用同一套规则）。
+    """
+    l_ws = left[len(left.rstrip(_SEAM_WS)):]
+    r_ws = right[: len(right) - len(right.lstrip(_SEAM_WS))]
+    l_base = left[: len(left) - len(l_ws)]
+    r_base = right[len(r_ws):]
+    l_nl, r_nl = l_ws.count("\n"), r_ws.count("\n")
+    if not l_base:
+        # 标记在文首：删处的行内空白全吃掉，只把右邻**末行缩进**还给内容。
+        return (r_ws[r_ws.rfind("\n") + 1:] if r_nl else "") + r_base
+    if not r_base:
+        # 标记在文尾：删处与拖尾空白一并吃掉。
+        return l_base
+    if not l_nl and not r_nl:
+        return l_base + (" " if (l_ws or r_ws) else "") + r_base
+    if l_nl and r_nl:
+        # 独占一行的标记：两侧各一个换行属于被删的那一行，合并成一个。
+        newlines = min(2, l_nl + r_nl - 1)
+    else:
+        newlines = min(2, l_nl + r_nl)
+    # 上一行的行尾空格（可能是硬换行）与下一行的缩进是内容，别动。
+    l_trail = l_ws[: l_ws.rfind("\n")].rsplit("\n", 1)[-1] if l_nl else ""
+    r_indent = r_ws[r_ws.rfind("\n") + 1:] if r_nl else ""
+    return l_base + l_trail + "\n" * newlines + r_indent + r_base
+
+
+#: 标记**独占一行**时，行首允许的纯 markdown 块级前缀（缩进 ≤3 + 列表项
+#: 记号 / 引用记号 / ATX 标题记号）。行首只有这种前缀、后面就是标记 ⇒ 整行
+#: 连前缀一起删（见 :func:`_splice_marker_out` 的 2026-10-05 对抗验证 #1）。
+_MARKDOWN_LINE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"[ \t]{0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]+|>+[ \t]?|#{1,6}[ \t]?)\Z"
+)
+
+#: 标记所在行**行尾**允许的空白（到换行或文尾为止）—— 与行首前缀一起判
+#: 「标记是不是这一行唯一的非空白内容」。
+_MARKDOWN_LINE_TAIL_RE: Final[re.Pattern[str]] = re.compile(r"[ \t]*(?:\n|\Z)")
+
+
+def _splice_marker_out(text: str, match: re.Match[str]) -> str:
+    """删掉一处标记，并**只在接缝处**收拾空白。
+
+    规则（接缝 = 被删跨度的左邻空白 + 右邻空白）：
+
+        · 标记贴着文首 → 它那一行（含缩进）全吃掉；右邻若跨行，**下一行
+          的缩进保留**（那是内容）；
+        · 标记贴着文尾 → 删处与拖尾空白一并吃掉（文尾空白无人可见）；
+        · 两侧都不跨行 → 合成一个空格（两侧本来就没空白则不加）；
+        · 单侧跨行 → 该侧的换行照留（至多压成两个），另一侧的同行空白
+          属于删处、吃掉；
+        · 两侧都跨行（标记独占一行）→ 两侧换行**合并成一个**，即原来
+          怎么隔开的就怎么接回去（``l_nl + r_nl - 1``，至多两个）。
+
+    ⚠️ 为什么按「行」而不是按「换行总数」删（2026-10-05 对抗验证 P2
+    实测）：早先 ``newlines = l_nl + r_nl`` 取 ``min(2, …)``、两侧空白
+    一律整段吞掉，两个后果都实测复现过：
+
+        · 独占一行的标记被当成**段落分隔**：清单 ``1. 酒店 600 元
+          \\n[tool_result pruned]\\n   备注：含早餐`` 剥完成了 ``1. 酒店
+          600 元\\n\\n备注：含早餐`` —— 多出一个空行把 tight list 变
+          loose，而下一行的三空格缩进（列表续行的标记）被吞、备注脱
+          离了列表项；
+        · 端到端更重：多出来的空行造出段落边界，尾部草稿剥离把
+          ``I need to bring my passport.`` 整行当草稿吃掉，用户只看到
+          ``出行清单：``。
+
+    行内空白只留两处有意义的：**上一行的行尾空格**（markdown 硬换行就
+    是它）与**下一行的缩进**；标记自己那一行的缩进与拖尾空格都属于
+    删处，吃掉。
+
+    ⚠️ 为什么**不能**像早先那样对全文做 ``[ \\t]{2,} → " "``、``\\n{3,}
+    → "\\n\\n"``、``[ \\t]+\\n → \\n`` 的全局规整：2026-10-05 对抗验证
+    实测 —— 只要同一轮里删过一处标记，整条正文都会被重写，远端内容跟着
+    遭殃：markdown 嵌套列表的三空格缩进塌成一格（层级被重排）、代码围栏
+    里的 Python 缩进被吃掉（``ast.parse`` 报 IndentationError）、行尾两
+    空格的硬换行消失、行内代码的对齐被压扁。那些字符与标记毫无关系。
+    接过缝只动删处，远端正文一个字节都不碰。
+
+    ⚠️ 「标记独占一行、且行首是纯块级前缀」时**整行连前缀一起删**（2026-10-05
+    对抗验证 #1）：``"- 酒店 600 元\\n- [tool_result pruned]\\n- 机票 1200 元"``
+    早先缝出 ``"- 酒店 600 元\\n-\\n- 机票 1200 元"`` —— 用户看到一个空列表项；
+    ``> [标记]`` / ``## [标记]`` 同理（空引用行、空标题）。判定：行首是
+    :data:`_MARKDOWN_LINE_PREFIX_RE`（缩进 ≤3 + 列表/引用/标题记号）、行尾到
+    换行（或文尾）只有空白。同行还有真内容（``- [标记] 备注``）时保持现行为，
+    只吃标记本身。
+
+    Args:
+        text (`str`): 当前文本。
+        match (`re.Match[str]`): 要删掉的标记跨度。
+
+    Returns:
+        `str`: 缝合后的文本。
+    """
+    left, right = text[: match.start()], text[match.end():]
+    line_start = left.rfind("\n") + 1
+    tail = _MARKDOWN_LINE_TAIL_RE.match(right)
+    if tail is not None and _MARKDOWN_LINE_PREFIX_RE.match(left[line_start:]) is not None:
+        # 整行连前缀一起删：前缀与标记同属被删的那一行，行尾空白/换行也归它。
+        return _merge_seam_removal(text[:line_start], right[tail.end():])
+    return _merge_seam_removal(left, right)
+
+
+#: 形状表内单条标记的**最大跨度**（字符数），用于
+#: :func:`_drain_seam` 的接缝窗口大小。
+#:
+#: ③ = 开标签属性 400 + ``>`` + 内容 4000 + 闭标签 ≈ 4440；①/②/④ ≤ ~420。
+#: 预筛掉 ③ 时小值就够 —— 窗口只影响**性能**（窗口开得越大，排干扫的
+#: 邻域越大），不变量（循环结束即不动点）由批量全量趟保证。
+_MAX_MARKER_SPAN_WITH_PAIR: Final[int] = 4600
+_MAX_MARKER_SPAN: Final[int] = 460
+
+
+#: 形状 → **必需字面量**（大小写不敏感的预编译正则）。区间里连这个字面量
+#: 都没有时，对应形状必然不命中，可以整个跳过 —— 只为性能，不影响结果。
+#:
+#: ⚠️ 只在 `_drain_seam` 的**窗口**上按需查（不在全文上预筛）：缝合可以在
+#: 接缝处拼出新字面量，而新命中又只出现在接缝邻域 —— 窗口级检查正好覆盖，
+#: 全文级预筛则会把那个洞露出来（`_INTERNAL_MARKER_PATTERNS_NO_PAIR` 的
+#: ③ 预筛是全文级的，代价是它必须**保守**地同时要求 ``<system`` 与 ``</``）。
+_MARKER_PATTERN_REQUIRED_LITERAL: Final[
+    tuple[tuple[re.Pattern[str], re.Pattern[str]], ...]
+] = (
+    (_PATTERN_BRACKET_VERB_BY, re.compile(r"by", re.IGNORECASE)),
+    (_PATTERN_SYSTEM_PAIR, re.compile(r"system", re.IGNORECASE)),
+    (_PATTERN_SYSTEM_LONE_TAG, re.compile(r"system", re.IGNORECASE)),
+)
+
+
+def _first_marker_match(
+    text: str,
+    pos: int,
+    endpos: int,
+    patterns: tuple[re.Pattern[str], ...],
+) -> re.Match[str] | None:
+    """返回 ``text`` 里 ``[pos, endpos)`` 区间内起点**最早**的一处形状表命中。
+
+    同起点按 ``patterns`` 表序取胜者（③ 整对优先于 ④ 单标签 —— 与批量趟
+    的贪心口径一致）。
+
+    ⚠️ ``endpos`` 会**截断**跨出右界的候选（Python ``re`` 的语义）：排干
+    是提速器、不是完整性保证（完整性由批量全量趟兜底），截断只会少排一处、
+    多跑一趟，不会删错。
+    """
+    best: re.Match[str] | None = None
+    for pattern in patterns:
+        if not _pattern_required_literal_present(pattern, text, pos, endpos):
+            continue
+        hit = pattern.search(text, pos, endpos)
+        if hit is not None and (best is None or hit.start() < best.start()):
+            best = hit
+    return best
+
+
+def _pattern_required_literal_present(
+    pattern: re.Pattern[str],
+    text: str,
+    pos: int,
+    endpos: int,
+) -> bool:
+    """该形状的必需字面量在 ``[pos, endpos)`` 里出现了吗（没有则必然不命中）。
+
+    ⚠️ 用**预编译正则**的带界搜索，不写 ``text.lower().find(...)`` ——
+    ``str.lower()`` 每次都要拷一份全文（级联里每轮每模式一次 ⇒ 平方级，
+    比它想省的那点扫描还贵）。字面量的预编译正则有快速扫描路径。
+    """
+    for candidate, literal in _MARKER_PATTERN_REQUIRED_LITERAL:
+        if candidate is pattern:
+            return literal.search(text, pos, endpos) is not None
+    return True
+
+
+#: 接缝排干**首轮**用的紧窗口左宽（字符）：新命中在真实级联形状里就贴在
+#: 接缝左侧几十字符处（``[tool_result pruned [tool_result pruned ]`` 这类
+#: 每层只有十几字符）。紧窗口搜不到时再用全窗口（``max_span``）兜一次 ——
+#: 排干只是提速器，兜底由批量全量趟负责，漏一次只是白跑一趟。
+#:
+#: ⚠️ 为什么要紧：窗口里每个 ``[`` 候选起点都要摊一遍形状表的匹配尝试
+#: （名词/动词交替 ≈ 3 µs/起点），42 KB 级联实测 66 µs/轮；紧窗口把候选
+#: 从 23 个压到个位数。级联 d=5000 实测因此从 ~1.0 秒降到 ~0.1 秒。
+_DRAIN_TIGHT_LEFT: Final[int] = 128
+
+
+def _drain_seam(
+    text: str,
+    join: int,
+    patterns: tuple[re.Pattern[str], ...],
+    max_span: int,
+) -> tuple[str, int]:
+    """在**接缝邻域**就地排干反复暴露的命中（提速，不改契约）。
+
+    Args:
+        text (`str`): 当前文本。
+        join (`int`): 上一次删除留下的接缝位置。
+        patterns (`tuple[re.Pattern[str], ...]`): 形状表（可为预筛后的子集）。
+        max_span (`int`): 单条标记的最大跨度（决定窗口大小）。
+
+    Returns:
+        `tuple[str, int]`: ``(文本, 排干处数)``。一处没排到就原样返回。
+
+    ⚠️ 为什么需要它（2026-10-05 对抗验证 #0/#26）：嵌套级联
+    （``"[tool_result pruned " × d + "]" × d``）每趟只暴露下一层，纯批量
+    循环的趟数 = 嵌套深度 × 全文长度：实测 16.8 KB 要 1.5 秒、42 KB 要
+    10.6 秒，拖着事件循环一起堵。而**新暴露的命中必然跨过接缝**（缝合只
+    改动接缝邻域），在接缝邻域顺序排干就把整个级联一次清完。
+
+    ⚠️ 与批量趟同源的口径：每轮取窗口内起点最早的一处、缝完从「起点 −
+    接缝空白 − max_span」继续找 —— 与 `_strip_internal_markers` 的批量趟
+    共享 `_splice_marker_out` 的接缝规则，窗口右界取 ``join + 2*max_span``
+    （新命中长度 ≤ max_span，右界留了双倍余量）。窗口内搜索**有界**：
+    「找不到」的代价是 O(窗口) 而不是 O(全文)，级联每层只花一次邻域搜索；
+    窗口右界外的命中留给批量趟（**完整性兜底**，见 `_first_marker_match`）。
+
+    ⚠️ 必需的 ``by`` / ``system`` 字面量在**窗口**上按轮检查（见
+    :data:`_MARKER_PATTERN_REQUIRED_LITERAL`）：平铺标记文本里 ② 没有 ``by``
+    可命中，不跳过的每次窗口搜索都要在整窗口的每个 ``[`` 起点做一遍惰性
+    展开 —— 级联 d=5000 实测因此从 ~0.5 秒降到 ~0.02 秒。
+    """
+    join = min(max(join, 0), len(text))
+    hi = min(len(text), join + 2 * max_span)
+    seam_ws = _seam_whitespace_run(text, join)
+    full_pos = max(0, join - seam_ws - max_span)
+    pos = max(full_pos, join - _DRAIN_TIGHT_LEFT)
+    removed = 0
+    while pos < hi:
+        hit = _first_marker_match(text, pos, hi, patterns)
+        if hit is None and pos > full_pos:
+            # 紧窗口空手：回全窗口兜一次（见 _DRAIN_TIGHT_LEFT）。
+            hit = _first_marker_match(text, full_pos, hi, patterns)
+            pos = full_pos
+        if hit is None:
+            break
+        start = hit.start()
+        seam_ws = _seam_whitespace_run(text, start)
+        before = len(text)
+        text = _splice_marker_out(text, hit)
+        removed += 1
+        # 缝合只改动删处与接缝空白：新命中的起点不会早于「删处起点 − 空白
+        # 长度 − max_span」，右界随删掉的字符数左移。
+        full_pos = max(0, start - seam_ws - max_span)
+        pos = max(full_pos, start - seam_ws - _DRAIN_TIGHT_LEFT)
+        hi = min(hi - (before - len(text)), len(text))
+    return text, removed
+
+
+def _seam_whitespace_run(text: str, index: int) -> int:
+    """``index`` 左侧连续接缝空白（``_SEAM_WS``）的长度。
+
+    ⚠️ 不写 ``len(text[:index]) - len(text[:index].rstrip(_SEAM_WS))`` ——
+    那要拷一份前缀（每次排干 O(全文)），级联里 O(命中数 × 全文长度)。
+    """
+    start = index
+    while start > 0 and text[start - 1] in _SEAM_WS:
+        start -= 1
+    return index - start
+
+
+def _strip_internal_markers(text: str) -> tuple[str, int]:
+    """剥掉正文里混入的**框架内部标记**（方括号标记 / 系统标签）。
+
+    Args:
+        text (`str`): 模型本轮写下的原文。
+
+    Returns:
+        `tuple[str, int]`: ``(剥掉标记后的文本, 剥掉的标记处数)``；
+        一处都没命中时原样返回 ``(text, 0)``。
+
+    ⚠️ 为什么是**跨度级就地剥除**，而不是并进 :func:`_strip_drafts` 的
+    段落级剥离：标记可能和真答案**同段**（``[marker] 好的，杭州两天…``）。
+    段落级剥离在这种形状下只有两个结局 —— 整段删（静默丢答案，本模块
+    最不能接受的失败形态）或整段留（标记上屏）。只删方括号那一段，两个
+    结局都不存在。剥完剩不剩内容交给下游 :func:`_answer_problem`：
+    只剩标记的轮次走「empty → 重说 → 兜底」的老路，不会给用户空白。
+
+    ⚠️ 形状表只认**方括号/全角方括号里的中英标记**与 ``<system-*>`` 标签
+    （见 :data:`_INTERNAL_MARKER_PATTERNS`）—— 中文括号（``【】``）、全角
+    圆括号（``（）``）与普通 markdown 链接（``[文字](url)``）刻意不在
+    **剥除**范围内：它们在差旅语境里太常见，误伤真答案的代价大于漏掉一个
+    变种标记。但「不剥」不等于「沉默放行」：这些括号里的候选同样进
+    :func:`_residual_marker_count` 的计数（在 ``_report`` 里上报），按数据
+    决定要不要扩表 —— 2026-10-05 对抗验证 P6 实测过反面：``【tool_result
+    cleared by postprune】`` 既不剥也不计数，指标全为 ``clean``。
+
+    ⚠️ 删除算法是「批量删一趟 + 接缝邻域就地排干」的不动点循环
+    （2026-10-05 对抗验证 #0/#26/#30 改造）：
+
+    1. 每趟对**全文**跑一遍形状表 ``finditer``，贪心选互不重叠的命中
+       （按起点排序，同起点按模式表序 —— 整对系统标签优先于单独开/闭
+       标签），**反序**缝合（右侧先删，左侧坐标不漂）。
+    2. 每处命中的**接缝邻域**调 :func:`_drain_seam` 顺序排干 —— 这是
+       **嵌套级联**的形状（一趟只暴露下一层），不排干就得为每一层再扫
+       一遍全文。窗口搜索有界，平铺输入上排干只是一次空手而归的邻域
+       搜索（便宜的保险）。
+    3. 回到 1，直到一趟什么都没删 —— 循环结束即**不动点**（形状表内的
+       标记一处不剩），幂等测试钉住。
+
+    ⚠️ 为什么不是「每趟只删一处 + 从接缝重扫」的严格顺序版（试过，退回了）：
+    顺序版每轮都要为**每个模式**做一次「从 pos 起找最早命中」的搜索，而
+    没有命中的模式（平铺标记文本里的 ② 号动词模式）每次都要扫到文尾才算
+    「没有」⇒ O(命中数 × 全文长度)，实测 3200 处标记 11.3 秒（批量版
+    0.04 秒）。批量趟把「扫到文尾」的代价摊到一趟一次；排干窗口则是
+    **有界**的（2×最长跨度），窗口内任何新增命中都必然跨过接缝。
+
+    旧实现只有第 1、3 步（批量 + 全文重扫）：嵌套级联
+    （``"[tool_result pruned " × d + "]" × d``）每趟只暴露一处、趟数 =
+    嵌套深度，实测 16.8 KB 要 1.5 秒、42 KB 要 10.6 秒，拖着事件循环一起
+    堵；「一堆开标签、零闭标签」的 ③ 号输入（``"<system-reminder>" × 8192``，
+    139 KB）在每个起点把惰性 ``[\\s\\S]{0,4000}?`` 展开到上限，实测 0.98 秒。
+    现在前者被第 2 步的接缝排干一次清完、后者被
+    :data:`_INTERNAL_MARKER_PATTERNS_NO_PAIR` 预筛掉 ③。
+
+    ⚠️ 已知残余：跨模式重叠的退化输入上，贪婪取「最早起点」可能留下半截
+    碎片（``[tool_result pruned`` 这样没有闭合括号的尾巴，2026-10-05 对抗
+    验证 #28 实测）—— 碎片自身不成形状、形状表管不到，但
+    :data:`_RESIDUAL_MARKER_PATTERNS` 的碎片模式会把它计进
+    ``residual_internal_marker``（可见，不沉默）。
+
+    ⚠️ 返回值**不对全文做 ``strip()``**（2026-10-05 对抗验证 P2b 实测）：
+    ``'    def f(): …\\n\\n[marker]\\n\\n好的。'`` 早先把文首那 4 个空格
+    （**远端**、与标记无关的代码缩进）也 strip 掉，与「只动删处」的契约
+    矛盾（markdown 里那是代码块的命根子）。首尾空白只在**删处贴着文首/
+    文尾**时由 :func:`_splice_marker_out` 收拾；一处没删时返回入参本身。
+
+    ⚠️ 调用方洗完**必须**不复用原始事件（见 ``_settle_round`` 末尾的
+    ``cleaned == raw_text`` 判据）—— 洗了却把旧事件发出去，用户看到的
+    还是带标记的文本，那是最坏的一种「洗了但白洗」。
+    """
+    if not text:
+        return text, 0
+    # ── ③ 的廉价预筛（见 _INTERNAL_MARKER_PATTERNS_NO_PAIR 的说明）──
+    # 预筛条件是**保守**的：文本里必须同时出现 ``<system`` 前缀与 ``</``
+    # 才保留 ③ 号模式。缝合理论上能拼出 ``</`` + ``system``（被删跨度恰好
+    # 夹在中间），那份保守就防住了这个洞 —— 宁可多跑一次 ③。
+    lower = text.lower()
+    if "<system" in lower and "</" in lower:
+        patterns = _INTERNAL_MARKER_PATTERNS
+        max_span = _MAX_MARKER_SPAN_WITH_PAIR
+    else:
+        patterns = _INTERNAL_MARKER_PATTERNS_NO_PAIR
+        max_span = _MAX_MARKER_SPAN
+    cleaned = text
+    removed = 0
+    while True:
+        hits: list[tuple[int, int, re.Match[str]]] = [
+            (hit.start(), index, hit)
+            for index, pattern in enumerate(patterns)
+            for hit in pattern.finditer(cleaned)
+        ]
+        if not hits:
+            break
+        hits.sort(key=lambda item: (item[0], item[1]))
+        chosen: list[re.Match[str]] = []
+        covered_until = -1
+        for start, _index, hit in hits:
+            if start >= covered_until:
+                chosen.append(hit)
+                covered_until = hit.end()
+        # ⚠️ 两段式：**先把这一趟选中的命中全部缝掉，再排干**。排干会删掉
+        # 文本、让还没缝的命中坐标失效（拿失效坐标去缝会删错内容 —— 实测
+        # 平铺输入下删除数翻倍），所以两件事绝不能交错。
+        #
+        # 反序缝合：右侧先删，左侧命中的坐标不受影响；顺带把每处的接缝在
+        # **新坐标**里的位置记下来（已删部分都在它右侧，减掉已删长度即可）。
+        base_len = len(cleaned)
+        seams: list[int] = []
+        for hit in reversed(chosen):
+            seams.append(hit.start() - (base_len - len(cleaned)))
+            cleaned = _splice_marker_out(cleaned, hit)
+            removed += 1
+        # 就地排干（嵌套级联：删完一处往往在接缝处露出下一层，见 `_drain_seam`）。
+        # 锚点用上面记的位置；排干只是提速器，前一轮排干可能让后面锚点漂
+        # 一点（`_drain_seam` 会钳到文本长度内），漂了只是白跑一趟 ——
+        # 完整性由本循环的全量趟兜底。
+        for join in seams:
+            cleaned, drained = _drain_seam(cleaned, join, patterns, max_span)
+            removed += drained
+    if not removed:
+        return text, 0
+    return cleaned, removed
+
+
+def _has_internal_marker(text: str) -> bool:
+    """文本里有没有形状表内的标记（只看有没有，不做剥除）。
+
+    Args:
+        text (`str`): 待查文本。
+
+    Returns:
+        `bool`: 命中任一形状即为真。
+
+    ⚠️ 专供「事件载荷直查」用（``TextBlockEndEvent.text`` 与 ``DELTA``
+    拼接**不是一回事**，见 ``_settle_round`` 里的旁路说明）—— 不返回
+    清洗结果，是为了不给调用方留下「拿它去洗」的错觉：清洗只有
+    :func:`_strip_internal_markers` 一条路（含接缝处理与不动点循环）。
+    """
+    return any(pattern.search(text) for pattern in _INTERNAL_MARKER_PATTERNS)
+
+
+def _residual_marker_count(text: str) -> int:
+    """统计文本里**形状表之外**仍像标记的残留处数（只上报，不改变行为）。
+
+    Args:
+        text (`str`): 已发出的文本（正文或思考链）。
+
+    Returns:
+        `int`: 命中 :data:`_RESIDUAL_MARKER_PATTERNS` 的处数。
+
+    ⚠️ 宽形状表会命中一部分**合法内容**（``[Luggage cleared by customs]``
+    这类），所以这里只计数、绝不删 —— 它的用途是让「表外变种漏给了用户」
+    这件事可见，而不是自动处置。见 :data:`_RESIDUAL_MARKER_PATTERNS`。
+
+    ⚠️ 计数按**命中的处**（合并重叠区间），不是「各模式命中次数之和」：
+    同一处文本可能同时落进两条残留模式（``[old data compressed by
+    context manager]`` 既含清理动词、又是 ``… by 机制名``），逐模式相加
+    会把一处报成两处（2026-10-05 对抗验证实测），指标与 WARNING 里的
+    「处数」被系统性放大。先把所有命中区间按起点排序、合并重叠，再数
+    不相交区间的个数。
+    """
+    return _residual_marker_count_in_prefix(text, len(text))
+
+
+def _residual_marker_count_in_prefix(text: str, limit: int) -> int:
+    """统计**起点 < ``limit``** 的残留候选处数（合并重叠区间后计数）。
+
+    Args:
+        text (`str`): 待扫文本（要给出**完整**上下文，候选才能成形）。
+        limit (`int`): 归属分界：起点 < ``limit`` 的候选算「已发出」。
+
+    Returns:
+        `int`: 处数。
+
+    ⚠️ 为什么按「起点」归属（2026-10-05 对抗验证 #14/#18）：工具流按 512
+    字留尾分段发出时，骑在切口上的候选（起点在发出的那段、结尾还在留尾
+    里）在旧实现里两边都数不到 —— 起点一旦发出，就再也没有第二次计数
+    机会。所以扫描窗口取**整段缓冲**（候选需要完整上下文才匹配得到），
+    归属只看起点落在切口的哪一侧。
+    """
+    spans = sorted(
+        (hit.start(), hit.end())
+        for pattern in _RESIDUAL_MARKER_PATTERNS
+        for hit in pattern.finditer(text)
+    )
+    count = 0
+    covered_until = -1
+    for start, end in spans:
+        if start >= limit:
+            break
+        if start >= covered_until:
+            count += 1
+            covered_until = end
+        elif end > covered_until:
+            covered_until = end
+    return count
+
+
+#: 工具通道流式缓冲保留的**尾巴**长度（见
+#: :meth:`ReplyGuardMiddleware._feed_tool_stream`）。
+#:
+#: 取值必须 ≥ 形状表内最长标记：①/②/④ 最长约 200/260/420 字符（④ 的属性
+#: 上限 400）；③ 的内容段可到 4000，但那要求工具载荷里恰好有一段成对的
+#: ``<system-*>`` 标签流式到达 —— 属理论形状（实测要见
+#: ``_feed_tool_stream`` 的边界说明）。512 覆盖全部现实形状，又把上屏延迟
+#: 压在半 KB 内。
+_TOOL_STREAM_HOLDBACK: Final[int] = 512
+
+#: 流式片段清洗的**边界哨兵**（非空白、不在任何形状表里）。
+#:
+#: ⚠️ 为什么需要它：:func:`_strip_internal_markers` 的接缝规则把「文首/
+#: 文尾」当作文本真正的边界（那里的空白全吃掉）。流式片段的首尾只是
+#: **缓冲区的切口** —— 用哨兵把切口包起来，接缝规则就会按「这是文本中间」
+#: 处理，不会吞掉留给前/后文的白（2026-10-05 对抗验证 P2b 的同族问题：
+#: 切口被当成文尾时，``"A [marker] "`` 会连分隔空格一起吃掉，续流接上
+#: ``"B"`` 就变成 ``"AB"``）。哨兵自身不可能被任何形状表命中。
+_STREAM_EDGE_GUARD: Final[str] = "\ue000"
+
+#: 工具通道两类流各自的 delta 事件类（flush 尾巴时按类重建）。
+_TOOL_STREAM_DELTA_CLASSES: Final[dict[str, type[EventBase]]] = {
+    "call": ToolCallDeltaEvent,
+    "result": ToolResultTextDeltaEvent,
+}
+
+#: system 标签的「成对等待」判定用（2026-10-05 对抗验证 #13，high）。
+#: 开标签的属性上限与形状表 ④ 对齐（400）—— 剥不掉的形状，等也等不来。
+_SYSTEM_OPEN_TAG_RE: Final[re.Pattern[str]] = re.compile(
+    r"<system[\s_-]*(?:reminder|info|warning|message)\b[^<>]{0,400}?>",
+    re.IGNORECASE,
+)
+_SYSTEM_CLOSE_TAG_RE: Final[re.Pattern[str]] = re.compile(
+    r"</system[\s_-]*(?:reminder|info|warning|message)\s*>",
+    re.IGNORECASE,
+)
+
+#: ③ 号模式能整对匹配的最大跨度（开标签属性 400 + 内容 4000 + 闭标签余量）。
+_SYSTEM_PAIR_MAX_SPAN: Final[int] = 4600
+
+#: 超长成对标签的**残留计数**模式（2026-10-05 对抗验证 #23）：内容超过 ③
+#: 的 4000 上限时，③ 匹配不到、④ 只删两个标签、中间内容留下 —— 这个模式
+#: 把那种「剥不干净的成对标签」计进残留（只计数，不删）。预筛见
+#: :func:`_oversize_system_pair_count`。
+_OVERSIZE_SYSTEM_PAIR_RE: Final[re.Pattern[str]] = re.compile(
+    r"<system[\s_-]*(?:reminder|info|warning|message)\b[^<>]{0,400}?>"
+    r"[\s\S]{4001,}?"
+    r"</system[\s_-]*(?:reminder|info|warning|message)\s*>",
+    re.IGNORECASE,
+)
+
+
+def _pending_system_open_end(text: str) -> int:
+    """返回 ``text`` 里**最后一个未配对** ``<system-*>`` 开标签的结束位置。
+
+    Args:
+        text (`str`): 原始（未清洗）文本。
+
+    Returns:
+        `int`: 结束位置；没有「后面还没有闭标签」的开标签时返回 -1。
+
+    ⚠️ 用途是工具流的「等待成对」判定（2026-10-05 对抗验证 #13，high）：
+    ④ 号模式会把**孤立**开标签先删掉，等闭标签分片到达时 ③ 号就永远看不到
+    整对 —— 内部指令内容原样上屏且落库。留尾缓冲在「最后一个开标签之后
+    还没有闭标签」时整段**原样**留着，等对上了再一次性剥（见
+    ``_feed_tool_stream``）。
+
+    判定刻意保守：只看**最后一个**开标签之后有没有闭标签。嵌套/交叉的
+    复杂形状（``<a><b>x</a>``）按「b 未配对」处理 —— 多等一段无害，早放行
+    才会漏。
+    """
+    last_end = -1
+    for hit in _SYSTEM_OPEN_TAG_RE.finditer(text):
+        last_end = hit.end()
+    if last_end < 0:
+        return -1
+    if _SYSTEM_CLOSE_TAG_RE.search(text, last_end) is not None:
+        return -1
+    return last_end
+
+
+def _oversize_system_pair_count(text: str) -> int:
+    """统计 ``text`` 里**内容超过 ③ 上限**的成对 system 标签处数（只计数）。
+
+    ⚠️ 用途是 #23 的可见性：③ 的内容上限 4000 是刻意的（防退化输入把正则
+    拖垮），代价是「超长的成对标签剥不干净」—— ③ 不命中、④ 只删两个标签、
+    中间内容留在文本里。这个计数器让那种残留**不沉默**（进
+    ``residual_internal_marker``）。调用方负责预筛：文本里没有 ``</`` 时
+    这里直接返回 0。
+    """
+    if "</" not in text:
+        return 0
+    return len(_OVERSIZE_SYSTEM_PAIR_RE.findall(text))
+
+
+#: system 标签族的四个名字（与 ③④ 两条模式同一份清单）。
+_SYSTEM_TAG_NAMES: Final[tuple[str, ...]] = (
+    "reminder",
+    "info",
+    "warning",
+    "message",
+)
+
+#: 「半截标记前缀」**宽判据**的标记体窗口上限。取 200 的理由：形状表里
+#: 最长的可剥标记是 ② 句式 —— ``[`` + 80 字前缀 + 动词 + ``by`` + 机制名
+#: + 60 字后缀 + ``]`` ≈ 190 字。窗口必须 **≥ 清洗器剥得掉的形状**：
+#: 2026-10-05 Round-4 的 completeness critic 实测，窗口 80 时
+#: ``[tool_result cleared by postprune: `` + 55 个 ``x`` + ``]`` 这种
+#: **整处可剥**的标记反而扣不住，两块拼起来完整上屏。
+_PARTIAL_MARKER_MAX_BODY: Final[int] = 200
+
+#: 「半截标记前缀」的**确信判据**（narrow）—— 只用于「删/清」类决定
+#: （回复结束丢不丢、算不算残留、工具名清不清）。开括号后紧跟工具族
+#: 名词（``tool…`` / ``inline…``），后面只有不带括号的标记体字符。
+#: ⚠️ 它必须 ⊆「清洗器剥得掉的形状」：全角 ``【`` 刻意不在其中 ——
+#: ①② 与 ③④ 都不认 ``【…】``（那是**只计数不删**的残留候选），扣了
+#: 也白扣，还会把内容切两半（2026-10-05 Round-4 的 completeness critic）。
+_PARTIAL_MARKER_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\[［][ \t]*(?:(?:old|previous)[\s_]+)?(?:tool|inline)"
+    r"[A-Za-z0-9_\-.,:;/ ]{0," + str(_PARTIAL_MARKER_MAX_BODY) + r"}$",
+    re.IGNORECASE,
+)
+
+#: 「半截括号前缀」的**宽判据** —— 只用于**扣留（顺延到下一段一起判）**。
+#: 扣留是零损失的（内容要么在下一段被整处剥掉、要么原样发出，见
+#: :func:`_pending_marker_prefix_start`），所以可以宽：任意未闭合的方括号
+#: 尾巴都认，包括 ``[t`` / ``[to`` / ``[too`` / ``[Context prun`` 这些
+#: 窄判据认不出、却可能长成可剥标记的形状（2026-10-05 Round-4 实测：
+#: 切在头 1–4 个字时完整标记照样上屏）。
+#: ⚠️ 体只收 ASCII 标记字符：``【来源：xx`` 这类中文内容不扣（扣了也只是
+#: 顺延，但让「块归属」无谓地漂移）。全角 ``【`` 留在宽判据里 —— 它虽然
+#: 剥不掉，扣住却能让**残留计数**看到完整的 ``【…】`` 候选（拆成两半时
+#: 两条残留模式都认不出）。
+_PARTIAL_BRACKET_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\[［【][ \t]*(?:(?:old|previous)[\s_]+)?"
+    r"[A-Za-z0-9_\-.,:;/ ]{0," + str(_PARTIAL_MARKER_MAX_BODY) + r"}$",
+    re.IGNORECASE,
+)
+
+#: system 标签的字面量（``<system-reminder>`` 里 ``<`` 与名字之间的那一段）。
+_SYSTEM_TAG_LITERAL: Final[str] = "system"
+
+
+def _system_tag_head_start(text: str, *, committed_only: bool = False) -> int:
+    """返回 ``text`` 结尾处「未写完的 system 开标签」的 ``<`` 位置。
+
+    Args:
+        text (`str`): 待查文本（通常是**未清洗**的原文）。
+        committed_only (`bool`): 只认「已经确定是四个标签之一」的形状 ——
+            字面量 ``system`` 写完、名字片段非空且是某个标签名的前缀。
+            供 :func:`_is_confident_marker_head` 的**删除**判定用；扣留用
+            宽判据（默认 ``False``），多扣没有代价（见
+            :func:`_pending_marker_prefix_start`）。
+
+    Returns:
+        `int`: ``<`` 的位置；结尾不是未写完的 system 开标签时返回 ``-1``。
+
+    ⚠️ 为什么是手写判断而不是一条正则（2026-10-05 自查发现）：④ 与
+    :data:`_SYSTEM_OPEN_TAG_RE` 都要求 ``>`` 收尾，切在标签名/字面量中间
+    的碎片谁都不认 —— 两块拼起来会把开标签**重新拼出来**（Round-4 的
+    refuter 实测 ``'A|<system-rem'`` + ``'inder>SECRET…'``）。而切点可以
+    落在**任何**位置，包括字面量 ``system`` 内部（``<sys`` + ``tem-reminder>``），
+    所以判据要覆盖「字面量的任意前缀」+「分隔符」+「名字的任意前缀」——
+    写成一条可读的正则很别扭（嵌套可选），手写循环更直白。
+
+    ⚠️ 只看**最后一个** ``<``（``rfind``）：文本里更早的 ``<`` 与本片段
+    无关（半截标签只可能在结尾）。``>`` 一出现就放弃 —— 收尾的标签交给
+    ④（孤立标签）与 :func:`_unpaired_system_open_start`（完整但未配对）。
+
+    ⚠️ 名字片段必须是四个标签名的前缀（``<systematic`` 这类英文单词因此
+    被排除）；``committed_only`` 额外要求名字**非空**（``<system-`` 这种
+    还认不出名字的形状不进删除通道，回复结束时按内容发出）。
+    """
+    idx = text.rfind("<")
+    if idx < 0:
+        return -1
+    frag = text[idx + 1 :].lower()
+    if ">" in frag:
+        return -1
+    if frag.startswith("/"):
+        # 闭标签头（``</`` / ``</system-rem`` …）：④ 剥孤立闭标签，同样
+        # 会被块边界截断 —— 拼起来一样是完整标记（2026-10-05 自查的穷举
+        # 探针实测：``'A|</'`` + ``'system-reminder>…'`` 拼出 ``</system-reminder>``
+        # 上屏）。
+        frag = frag[1:]
+    literal = _SYSTEM_TAG_LITERAL
+    matched = 0
+    while (
+        matched < len(frag)
+        and matched < len(literal)
+        and frag[matched] == literal[matched]
+    ):
+        matched += 1
+    if matched < len(literal):
+        # 字面量还没写完：整段都得是它的前缀（``<`` / ``<s`` / ``<sys`` …）。
+        # ⚠️ 连**光秃秃一个 ``<``** 也收 —— 切点可以落在这里（实测：
+        # ``'A|<'`` + ``'system-reminder>SECRET…'`` 两块拼出完整标签），
+        # 而扣留永不删除，多扣的代价只是「内容归属挪到下一块」。
+        if committed_only:
+            return -1
+        return idx if matched == len(frag) else -1
+    rest = frag[len(literal) :]
+    stripped = rest.lstrip(" \t_-")
+    separator = len(rest) - len(stripped)
+    name_len = 0
+    while (
+        name_len < len(stripped)
+        and stripped[name_len].isascii()
+        and stripped[name_len].isalpha()
+    ):
+        name_len += 1
+    name = stripped[:name_len]
+    tail = stripped[name_len:]
+    if name and not any(tag.startswith(name) for tag in _SYSTEM_TAG_NAMES):
+        return -1
+    if tail and not tail[0].isspace():
+        # 名字后面只能跟属性（空白开头），否则不是标签（如 ``<systematic``）。
+        return -1
+    if committed_only and not name:
+        return -1
+    return idx
+
+
+def _pending_marker_prefix_start(text: str) -> int:
+    """返回 ``text`` 结尾处「半截标记前缀」的起点；没有时返回 ``-1``。
+
+    Args:
+        text (`str`): **未清洗**的原文（某一块思考链 / 某一轮正文的拼接）。
+
+    Returns:
+        `int`: 需要扣在手里、接到下一段一起判的尾段起点。
+
+    ⚠️ 为什么需要（2026-10-05 第三轮对抗验证的完整性缺口）：思考块按
+    ``THINKING_BLOCK_END`` 逐块结算、正文按轮结算，**块边界是新的缝** ——
+    标记被块边界拦腰截断时，两半各自通过清洗（谁都没看到完整标记），
+    拼起来就是完整标记，而实时流与落库都是拼着的。工具通道靠 512 字
+    留尾缓冲挡住了这个形状，思考链/正文此前没有对应机制。
+
+    ⚠️ 必须在**清洗前**的原文上求（2026-10-05 Round-4 第一号缺陷）：
+    孤立 ``<system-*>`` 开标签会被 ④ 先删掉，在清洗后的文本上
+    :func:`_pending_system_open_end` 永远看不到它 —— 旧实现在清洗后求，
+    system 分支是死代码，跨块的 ``<system-*>…</system-*>`` 内容原样上屏。
+
+    三个候选臂，取**最早**的一个（扣得越多越安全，见下）：
+
+        · 宽判据的方括号头（:data:`_PARTIAL_BRACKET_SUFFIX_RE`）；
+        · 未写完的 system 开标签头（:func:`_system_tag_head_start`）；
+        · 完整但未配对的 ``<system-*>`` 开标签（:func:`_pending_system_open_end`）。
+
+    ⚠️ 扣留**永不删除**：扣下的尾段接到下一段前面一起判 —— 标记被补齐就
+    整处剥掉，没补齐就随下一段**原样上屏**（宽判据认下的形状不删；只有
+    回复结束时的窄判据碎片才丢弃并计数，见 ``_resolve_pending_marker_prefix``）。
+    旧实现拿窄判据扣、拿 ``startswith`` 删，实测把 18 字推理连同半截标记
+    一起删掉、指标还记 ``clean``（2026-10-05 Round-4 第二/三号缺陷）。
+
+    ⚠️ 只认**结尾**（``$``）：半截标记只可能出现在被截断的那一侧。
+    """
+    candidates: list[int] = []
+    bracket = _PARTIAL_BRACKET_SUFFIX_RE.search(text)
+    if bracket is not None:
+        candidates.append(bracket.start())
+    tag_head = _system_tag_head_start(text)
+    if tag_head >= 0:
+        candidates.append(tag_head)
+    unpaired = _unpaired_system_open_start(text)
+    if unpaired >= 0:
+        candidates.append(unpaired)
+    return min(candidates) if candidates else -1
+
+
+def _unpaired_system_open_start(text: str) -> int:
+    """未配对 ``<system-*>`` 开标签的 ``<`` 位置；没有时返回 ``-1``。
+
+    Args:
+        text (`str`): 待查文本（原文）。
+
+    Returns:
+        `int`: 开标签起点（``open_end`` 之后的内容仍在
+        :data:`_SYSTEM_PAIR_MAX_SPAN` 之内才算 —— 再长 ③ 也配不上，
+        不再空等）。
+    """
+    open_end = _pending_system_open_end(text)
+    if 0 <= open_end and len(text) - open_end <= _SYSTEM_PAIR_MAX_SPAN:
+        # 从开标签**起点**扣起（``open_end`` 是标签的结束位置）。
+        return text.rfind("<", 0, open_end)
+    return -1
+
+
+def _is_confident_marker_head(fragment: str) -> bool:
+    """这个片段是不是「确信是内部标记的开头」（只用于**删/清**类决定）。
+
+    Args:
+        fragment (`str`): 一段文本（通常是扣在手里的尾段或工具名）。
+
+    Returns:
+        `bool`: 为真表示「可以按标记处置」（不发给用户 / 从名字里清掉）。
+
+    ⚠️ 与 :func:`_pending_marker_prefix_start`（宽判据，只管扣留）分开：
+    宽判据认下的形状**绝不删**（扣留零损失），只有这里的窄判据才允许
+    「不发出去」。窄判据的两个族：
+
+        · 方括号族：:data:`_PARTIAL_MARKER_SUFFIX_RE`（``[tool…`` /
+          ``[old tool…`` / ``[inline…``，⊆ 清洗器剥得掉的形状）；
+        · system 标签族：未写完的开标签头（:func:`_system_tag_head_start`
+          命中在 0）或**以未配对开标签开头**（:func:`_unpaired_system_open_start`
+          命中在 0）—— 两族 ③④ 都剥得掉。
+          ⚠️ 判据是「**以**开标签开头」而不是「就是开标签」（旧写法要求
+          ``open_end == len(fragment)``，扣着 ``<system-reminder>B`` 这种
+          「开标签 + 还没写完的内容」时判不中 → 回复结束时会把内部指令
+          原样发给用户，2026-10-05 自查发现）。
+    """
+    if not fragment:
+        return False
+    if _PARTIAL_MARKER_SUFFIX_RE.fullmatch(fragment):
+        return True
+    if _system_tag_head_start(fragment, committed_only=True) == 0:
+        return True
+    return _unpaired_system_open_start(fragment) == 0
+
+
+def _is_any_marker_head(fragment: str) -> bool:
+    """``fragment`` 是不是「像标记开头」（宽判据；**绝不**用于删正文内容）。
+
+    ⚠️ 用途只有工具名：名字本该是标识符，任何括号/system 标签形状都
+    不可能是合法工具名（与正文通道的方向相反，这里不存在误伤真内容
+    的风险）。正文内容的删除判定一律走 :func:`_is_confident_marker_head`。
+    """
+    if not fragment:
+        return False
+    if _PARTIAL_BRACKET_SUFFIX_RE.fullmatch(fragment):
+        return True
+    return _is_confident_marker_head(fragment)
+
+
+def _first_marker_span(text: str) -> tuple[int, int] | None:
+    """返回 ``text`` 里最早一处**形状表内**标记的 ``(起点, 终点)``。
+
+    Args:
+        text (`str`): 待查文本。
+
+    Returns:
+        `tuple[int, int] | None`: 最早命中区间；没有时返回 ``None``。
+
+    ⚠️ 供跨通道缝合用（``_feed_tool_stream``）：判断一处标记是不是横跨
+    「上一段扣留 → 本条工具载荷」的缝 —— 只有起点落在扣留里、终点落在
+    载荷里，才值得把两半拼起来一起洗（2026-10-05 Round-4 第 14 号缺陷）。
+    """
+    best: tuple[int, int] | None = None
+    for pattern in _INTERNAL_MARKER_PATTERNS:
+        hit = pattern.search(text)
+        if hit is not None and (best is None or hit.start() < best[0]):
+            best = (hit.start(), hit.end())
+    return best
+
+
+def _oversize_system_pair_count_in_prefix(text: str, limit: int) -> int:
+    """统计**起点 < ``limit``** 的超长成对 system 标签处数（工具流用）。
+
+    Args:
+        text (`str`): 工具流的整段缓冲（**清洗前** —— 标签一旦被 ④ 删掉，
+            这个形状就再也认不出来了）。
+        limit (`int`): 归属分界：起点 < ``limit`` 的算「本轮已发出」。
+
+    Returns:
+        `int`: 处数。
+
+    ⚠️ 与 :func:`_oversize_system_pair_count` 的分工：那个用在正文通道
+    （整轮文本一次性结算，不需要分界）；这个用在工具通道的 512 字留尾
+    分段上 —— 与 :func:`_residual_marker_count_in_prefix` 同一套「起点
+    归属」口径。
+
+    ⚠️ 按**起点**归属不会重复计数：命中一次之后那对标签已经被 ④ 从缓冲里
+    删掉（留尾缓冲存的 always 是清洗后的文本），下一轮不可能再匹配到；
+    起点还在留尾里的则留到下一次再数。骑在切口上的那处既不漏也不重。
+    """
+    if "</" not in text:
+        return 0
+    return sum(
+        1 for hit in _OVERSIZE_SYSTEM_PAIR_RE.finditer(text) if hit.start() < limit
+    )
+
+
+def _scrub_event_delta(event: EventBase) -> EventBase:
+    """把事件 ``delta`` 载荷里的内部标记就地删掉（兜底的安全网）。
+
+    Args:
+        event (`EventBase`): 即将透传的事件。
+
+    Returns:
+        `EventBase`: 洗过的副本；``delta`` 不含标记时**原样返回入参**
+        （保住对象同一性，也让「没动过」在调用点上是一眼可见的）。
+
+    ⚠️ 工具通道的两类 delta（``ToolCallDeltaEvent`` /
+    ``ToolResultTextDeltaEvent``）**不走这里**：它们由
+    :meth:`ReplyGuardMiddleware._feed_tool_stream` 按流缓冲、连跨分片的
+    标记一起洗（2026-10-05 对抗验证实测：只洗「整处标记在同一 delta 里」
+    的版本会被流式分片绕过 —— ``'{"note": "[tool_result clea'`` +
+    ``'red by postprune]"}'`` 两片各自干净，拼起来完整标记上屏且落库）。
+    本函数只给「将来新增的、带 ``delta`` 文本的其它事件类型」留一张网：
+    今天没有任何事件走到它（带 delta 的四个类都有专属路径）。
+    """
+    delta = getattr(event, "delta", None)
+    if not isinstance(delta, str) or not delta:
+        return event
+    cleaned, removed = _strip_internal_markers(delta)
+    if not removed:
+        return event
+    return event.model_copy(update={"delta": cleaned})
+
+
+def _confident_carry_survived(carried: str, cleaned: str) -> bool:
+    """扣来的半截前缀是不是「确信是标记族、却没等到下半截」。
+
+    Args:
+        carried (`str`): 上一次结算扣在手里的尾段（可能为空串）。
+        cleaned (`str`): 接上它、洗过标记之后的文本。
+
+    Returns:
+        `bool`: 为真表示这一段值得配一条 WARNING（「扣下的前缀没等到
+        下半截」）。⚠️ 不额外记账：碎片随本段上屏，残留扫描会数到它。
+
+    ⚠️ 判据是「洗过之后它还在原处」：前缀被下半截补齐时整处标记会被
+    :func:`_strip_internal_markers` 一起吃掉（``startswith`` 不成立）；
+    还在，说明它等不到下半截了。
+
+    ⚠️ **不删**（2026-10-05 Round-4 第二/三号缺陷）：旧实现
+    （``_absorb_carried_prefix``）在这里把前缀连同一大段合法推理一起
+    删掉、指标还记 ``clean``。现在的取舍是「宁漏不删」——文本原样发出，
+    只记账 + WARNING，让运维看得见。只有**回复结束**时（半截标记的
+    下半截已经没有机会到来）才收紧成丢弃，见
+    ``_resolve_pending_marker_prefix``。
+    """
+    return bool(carried) and cleaned.startswith(carried) and _is_confident_marker_head(carried)
+
+
+def _scrub_tool_call_name(event: EventBase) -> tuple[EventBase, int]:
+    """洗掉工具事件 ``tool_call_name`` 里的内部标记（2026-10-05 缺口 ②）。
+
+    Args:
+        event (`EventBase`): ``ToolCallStartEvent`` / ``ToolResultStartEvent``。
+
+    Returns:
+        `tuple[EventBase, int]`: ``(要发出的事件, 剥掉的标记处数)``；
+        名字干净时**原样返回入参**、处数为 0。
+
+    ⚠️ 为什么单开一条通道（2026-10-05 第三轮对抗验证的完整性缺口 ②）：
+    ``tool_call_name`` 是模型可写的字段，而且是**双份可见**的 —— 前端拿它
+    当执行链标题，``Msg.append_event`` 又把它写进 ``ToolCallBlock.name`` /
+    ``ToolResultBlock.name`` 落库（``agentscope/message/_base.py`` 的
+    ``TOOL_CALL_START`` / ``TOOL_RESULT_START`` 两个分支）。实测：名字为
+    ``[tool_result pruned]`` 时原样透传落库，残留计数为 0（不是"洗过了"，
+    是**根本没看**）。
+
+    ⚠️ 改名字**不影响执行**：上游执行用的是模型分片解析出来的 ``tool_call``
+    对象（``_agent.py`` 的 ``_acting`` 链路），中间件拿到的事件是**下游副本**
+    —— 这一点与 :func:`_scrub_event_delta` 同源（``on_reply`` 包的是
+    ``_reply_impl``，改动只影响发出去的那一份）。
+
+    ⚠️ 判据与其它通道一致（:func:`_has_internal_marker` 预筛 +
+    :func:`_strip_internal_markers`）：工具名本该是标识符，合法取值里不可能
+    出现标记形状 —— 所以这里的剥离**不存在误伤真内容**的风险（与正文通道
+    的方向相反）。整个名字都是标记时剥完是空串：不发旧名字、也不编一个
+    假名字，空着是诚实的（界面上就是个没有标题的调用）。
+
+    ⚠️ **半截标记头**（2026-10-05 Round-4 第四号缺陷）：名字被流式截成
+    ``[tool_result clea`` / ``<system-rem`` 这类形状时，完整标记的正则
+    一个都不命中 —— 旧实现原样透传 + 落库。名字通道用**宽判据**
+    （:func:`_is_any_marker_head`；名字不存在误伤真内容的问题）整名清空。
+    """
+    name = getattr(event, "tool_call_name", "") or ""
+    if not name:
+        return event, 0
+    if not _has_internal_marker(name) and not _is_any_marker_head(name.strip()):
+        return event, 0
+    cleaned, removed = _strip_internal_markers(name)
+    if not removed:
+        # 半截标记头：整名清空（仍要换对象 —— 下游看到的是副本）。
+        return event.model_copy(update={"tool_call_name": ""}), 1
+    return event.model_copy(update={"tool_call_name": cleaned.strip()}), removed
+
+
+def _hint_text(event: EventBase) -> str:
+    """取出 ``HintBlockEvent.hint`` 的文本（``str`` 或 ``TextBlock`` 列表）。
+
+    Args:
+        event (`EventBase`): 任意事件（不是提示块时返回空串）。
+
+    Returns:
+        `str`: 供残留扫描用的文本。
+    """
+    hint = getattr(event, "hint", None)
+    if isinstance(hint, str):
+        return hint
+    if isinstance(hint, (list, tuple)):
+        parts: list[str] = []
+        for block in hint:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    return ""
+
+
+def _scrub_hint_event(event: EventBase) -> tuple[EventBase, int]:
+    """洗 ``HintBlockEvent.hint`` 里的内部标记。
+
+    Args:
+        event (`EventBase`): ``HintBlockEvent``（或任意事件，原样返回）。
+
+    Returns:
+        `tuple[EventBase, int]`: ``(要发出的事件, 剥掉的标记处数)``。
+
+    ⚠️ 为什么补这条通道（2026-10-05 Round-4 的 completeness critic）：
+    ``hint`` 是**第五条**上屏且落库的通道 —— ``Msg.append_event`` 的
+    ``HINT_BLOCK`` 分支把 ``hint``（``str`` 或 ``TextBlock``/``DataBlock``
+    列表）原样写进消息，既没有清洗器也没有残留扫描。提示文本通常由框架
+    自带（本项目的重试提示也是自产的），但 ``hint`` 可以装载被复述的
+    上下文（模型侧再次生成的提示块），与其它通道同规格处理成本极低。
+    """
+    hint = getattr(event, "hint", None)
+    if isinstance(hint, str):
+        if not hint:
+            return event, 0
+        cleaned, removed = _strip_internal_markers(hint)
+        if not removed:
+            return event, 0
+        return event.model_copy(update={"hint": cleaned}), removed
+    if isinstance(hint, (list, tuple)):
+        total = 0
+        changed = False
+        copied: list[Any] = []
+        for block in hint:
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and text:
+                cleaned_text, removed = _strip_internal_markers(text)
+                if removed:
+                    total += removed
+                    changed = True
+                    block = block.model_copy(update={"text": cleaned_text})
+            copied.append(block)
+        if not changed:
+            return event, 0
+        return event.model_copy(update={"hint": copied}), total
+    return event, 0
+
+
+def _scrub_named_fields(event: EventBase) -> tuple[EventBase, int]:
+    """洗事件里 ``name`` / ``media_type`` 两个可落库字符串字段。
+
+    Args:
+        event (`EventBase`): 任意事件（没有这两个字段时原样返回）。
+
+    Returns:
+        `tuple[EventBase, int]`: ``(要发出的事件, 剥掉的标记处数)``。
+
+    ⚠️ 为什么（2026-10-05 Round-4 的 toolname 镜片）：``DataBlockStartEvent``
+    的 ``name`` / ``media_type`` 与 ``ToolResultDataDeltaEvent`` 的
+    ``media_type`` 都会被 ``Msg.append_event`` 落库（``_base.py`` 的
+    ``DATA_BLOCK_START`` 分支），而它们与 ``tool_call_name`` 同类 ——
+    模型可写、用户/数据库可见，此前不在任何清洗通道里。工具名通道的
+    :func:`_scrub_tool_call_name` 用宽判据（整名清空）；这里同样用宽判据
+    —— 字段语义是受控短标识，不存在误伤真内容的风险。
+    """
+    updates: dict[str, str] = {}
+    total = 0
+    for field_name in ("name", "media_type"):
+        value = getattr(event, field_name, None)
+        if not isinstance(value, str) or not value:
+            continue
+        cleaned_value, removed = _strip_internal_markers(value)
+        if removed:
+            updates[field_name] = cleaned_value.strip()
+            total += removed
+        elif _is_any_marker_head(value.strip()):
+            updates[field_name] = ""
+            total += 1
+    if not updates:
+        return event, 0
+    return event.model_copy(update=updates), total
 
 
 def _strip_drafts(text: str) -> tuple[str, int]:
@@ -1349,12 +2812,20 @@ def _answer_problem(text: str) -> str | None:
 
     三种不可用：
 
-        - ``"empty"``：剥离后什么都不剩；
+        - ``"empty"``：剥离后什么都不剩，或只剩标点/符号；
         - ``"placeholder"``：只剩一句「稍等 / 正在查询」（见 :func:`_is_placeholder`）；
         - ``"monologue"``：整段都是写给自己的（所有段落都是草稿）。
+
+    ⚠️ 「只剩标点」也算 ``"empty"``（2026-10-05 对抗验证 P3 实测）：
+    ``[tool_result pruned]。`` 剥完只剩一个句号，早先判据放行 —— 用户收到
+    一个孤零零的「。」。``\\w`` 在 Unicode 下涵盖 CJK/字母/数字，正常答复
+    不可能一个都不命中；没有一个可读字符的轮次与空白轮次同义（不可用，
+    走重说），比让标点上屏更接近用户预期。
     """
     stripped = text.strip()
     if not stripped:
+        return "empty"
+    if not re.search(r"\w", stripped):
         return "empty"
     if _is_placeholder(stripped):
         return "placeholder"
@@ -1692,6 +3163,14 @@ class _ReplyState:
         round_events (`list[EventBase]`): 本轮缓冲的文本事件（原样保留，
             剥离后没变化时按原事件发出，保住 block id）。
         round_text (`list[str]`): 本轮文本的增量片段。
+        round_thinking_events (`list[EventBase]`): 当前思考块缓冲的事件
+            （``THINKING_BLOCK_START/DELTA/END``）。思考链是**用户可见**的
+            （前端渲染 + 落库），所以同样要过标记清洗 —— 但只在块结束时
+            结算（那时才知道完整文本），且**不**做草稿剥离/闸门（那是正文
+            的内容审计，思考链本来就该是推理过程）。
+        round_thinking (`list[str]`): 当前思考块的增量片段。
+        emitted_thinking (`str`): **实际发给用户**的思考链（供收尾的残留
+            标记计数用）。
         round_tools (`list[str]`): 本轮出现过的工具名。
         emitted (`bool`): 是否已经向用户发出过正文。
         emitted_text (`str`): **实际发给用户**的正文（供收尾审计用）。
@@ -1710,14 +3189,47 @@ class _ReplyState:
             只被 :meth:`ReplyGuardMiddleware._fallback_if_silent` 读取 ——
             用来阻止「拦下的编造被兜底原样复活」（2026-10-04 缺陷 F4）。
         block_seq (`int`): 已合成的 block 数（用来生成唯一 block id）。
+        pending_clean (`bool`): 干净结算的 ``clean`` 动作待记账（见同名
+            字段的说明与 :meth:`flush_pending_clean`）。
+        residual_precount (`int`): 剥离前就已知的残留（超长成对 system
+            标签），以及结算边界上「确信是标记族、却没等到下半截」而
+            丢弃/记账的残片处数，计入
+            :meth:`ReplyGuardMiddleware._report` 的总数。
+            ⚠️ 工具名通道**不在**这里：名字剥/清掉的处数走
+            ``round_marker_stripped`` + ``stripped_internal_marker`` 指标
+            （名字不是正文，不计入「残留」口径）—— 旧注释把它写进这份
+            清单是错的（2026-10-05 Round-4 的 completeness critic）。
+        pending_marker_prefix (`str`): 结算边界上扣在手里的「半截标记前缀」
+            （见同名字段的说明与 :func:`_pending_marker_prefix_start`）。
     """
 
     reply_id: str = ""
     round_events: list[EventBase] = field(default_factory=list)
     round_text: list[str] = field(default_factory=list)
+    round_thinking_events: list[EventBase] = field(default_factory=list)
+    round_thinking: list[str] = field(default_factory=list)
+    emitted_thinking: str = ""
     round_tools: list[str] = field(default_factory=list)
     emitted: bool = False
     emitted_text: str = ""
+    #: **逐块**记下用户实际看到的正文（``TEXT_BLOCK_END`` 覆盖载荷生效时
+    #: 记载荷，否则记本块的 DELTA 拼接）。残留扫描按块扫（2026-10-05 对抗
+    #: 验证 #11/#21/#27）：拿「整轮 DELTA 拼接」与「覆盖载荷」两串分别扫
+    #: 会重复计数（载荷 ⊇ 正文时同一处候选算两遍），把多块拼成一串扫又会
+    #: 造出跨块的伪候选（块 1 结尾 ``[Luggage clea`` + 块 2 开头
+    #: ``red by customs]``）。逐块扫两头都躲开。
+    emitted_blocks: list[str] = field(default_factory=list)
+    #: 上一次结算（思考块结束 / 正文轮结束）时**扣在手里**的「半截标记前缀」
+    #: （见 :func:`_pending_marker_prefix_start`）。标记被块边界拦腰截断时，
+    #: 两半各自通过清洗、拼起来就是完整标记 —— 尾段扣到下一次结算、接到
+    #: 下一段前面一起判，才能让清洗看到完整标记（2026-10-05 第三轮对抗
+    #: 验证的完整性缺口 ①）。
+    #: ⚠️ 扣留**永不删除**（2026-10-05 Round-4 第二/三号缺陷）：下一段照常
+    #: 带它上屏 —— 被下半截补齐就整处剥掉，没补齐就原样发出（确信是标记族
+    #: 的碎片记一处残留 + WARNING，宽判据认下、窄判据不认的一律按内容发出）。
+    #: 只有**回复结束**时（下半截已无机会到来）才把确信族丢弃，
+    #: 见 ``_resolve_pending_marker_prefix``。
+    pending_marker_prefix: str = ""
     drafts: list[str] = field(default_factory=list)
     retries: int = 0
     pending_problem: str | None = None
@@ -1728,12 +3240,58 @@ class _ReplyState:
     user_text: str = ""
     blocked_texts: set[str] = field(default_factory=set)
     block_seq: int = 0
+    #: 工具通道两条流各自的「留尾」缓冲（键 = ``(kind, tool_call_id)``，
+    #: 见 :meth:`ReplyGuardMiddleware._feed_tool_stream`）。
+    tool_stream_pending: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: 工具载荷里「形状表外」的残留候选处数（工具载荷同样上屏/落库）。
+    tool_residual: int = 0
+    #: ``TEXT_BLOCK_END`` 覆盖载荷与 DELTA 拼接**不同**的文本（真覆盖才会
+    #: 进这里）—— 落库/刷新后看到的是它，残留扫描不能漏（对抗验证 P5）。
+    end_override_texts: list[str] = field(default_factory=list)
+    #: 本轮是否剥过内部标记（任何通道）。``clean`` 的语义是「一个字符都
+    #: 没改」，剥过标记的轮次再记 ``clean`` 会让指标自相矛盾（对抗验证
+    #: 实测：思考链剥了标记、正文干净时两个动作同时出现）。
+    round_marker_stripped: bool = False
+    #: 干净结算的 ``clean`` 动作**已判定、待记账**（2026-10-05 对抗验证
+    #: #15）。推迟的理由是真实事件顺序：工具结果事件在 ``ModelCallEndEvent``
+    #: **之后**到达（``_settle_round`` 已经跑完），就地记 ``clean`` 的话，
+    #: 同一轮的工具载荷随后剥了标记也追不回来 —— 指标自相矛盾。记录推迟
+    #: 到下一个轮次边界（``begin_round`` / ``ReplyEnd`` / ``_report``），
+    #: 那时才把 ``round_marker_stripped`` 的最终值作为判据。
+    pending_clean: bool = False
+    #: 「剥不干净的成对 system 标签」的残留处数（2026-10-05 对抗验证 #23）：
+    #: 正文轮在剥离前统计（见 :func:`_oversize_system_pair_count`），计入
+    #: :meth:`ReplyGuardMiddleware._report` 的残留总数。
+    residual_precount: int = 0
 
-    def begin_round(self) -> None:
-        """开始新的一轮模型调用：清空本轮缓冲。"""
+    def begin_round(self, *, flush_clean: bool = True) -> None:
+        """开始新的一轮模型调用：清空本轮缓冲。
+
+        Args:
+            flush_clean (`bool`): 是否在此处给上一轮的 ``clean`` 记账。
+                ``ModelCallEndEvent`` 那处调用传 ``False`` —— 工具结果事件
+                在它之后才到，必须留到下一个边界再判定（见
+                :attr:`pending_clean`）。
+        """
+        if flush_clean:
+            self.flush_pending_clean()
         self.round_events = []
         self.round_text = []
+        self.round_thinking_events = []
+        self.round_thinking = []
         self.round_tools = []
+        self.round_marker_stripped = False
+
+    def flush_pending_clean(self) -> None:
+        """给待记账的 ``clean`` 行动作定性（记 / 不记），然后清标志。
+
+        ⚠️ 判据取**此刻**的 ``round_marker_stripped``：推迟期间任何通道
+        （正文/思考链/工具载荷/END 载荷）剥过标记，这一轮就不再算 ``clean``
+        （见 :attr:`pending_clean`）。
+        """
+        if self.pending_clean and not self.round_marker_stripped:
+            observe_reply_guard("clean")
+        self.pending_clean = False
 
     def round_content(self) -> str:
         """返回本轮已缓冲的文本。"""
@@ -1763,6 +3321,100 @@ def _synth_text_events(reply_id: str, text: str, block_id: str) -> list[EventBas
         TextBlockStartEvent(reply_id=reply_id, block_id=block_id),
         TextBlockDeltaEvent(reply_id=reply_id, block_id=block_id, delta=text),
         TextBlockEndEvent(reply_id=reply_id, block_id=block_id, text=text),
+    ]
+
+
+def _complete_thinking_blocks(events: list[EventBase]) -> list[EventBase]:
+    """把缓冲的思考块事件补全成结构完整的 ``START → DELTA → END`` 三件套。
+
+    Args:
+        events (`list[EventBase]`): 缓冲的思考块事件（同一批，可能含多个块）。
+
+    Returns:
+        `list[EventBase]`: 结构完整的事件。**结构本来完整的块原样返回**
+        （同一个事件对象、同一个 ``block_id``）；只有残缺的块被重建。
+        没有事件时返回空列表。
+
+    ⚠️ 为什么必须补（2026-10-05 对抗验证 #5/#7/#9）：服务端的 ``Msg.append_event``
+    靠 ``THINKING_BLOCK_START`` **创建**块、后面的 DELTA/END 靠
+    ``_find_block`` 去找 —— 缺 START 时整块思考链在落库侧蒸发（实时流却
+    有），缺 END 时块永远悬着。剥过标记的路径一直是合成完整三件套，干净
+    路径却原样透传，同一个缺陷只修了一半。
+
+    ⚠️ 重建时 ``block_id`` **保留原件**：块从未发出，用原 id 不会撞块；
+    换 id（此前 ``_settle_thinking`` 的标记路径用 ``think-`` 前缀）是为了
+    标记「这是洗过的」，而干净路径没有洗过 —— 换 id 会让前端已经渲染的
+    块对不上（2026-10-05 对抗验证 #9 实测：干净块被重合成丢原 id）。
+    """
+    order: list[str] = []
+    groups: dict[str, list[EventBase]] = {}
+    for event in events:
+        block_id = getattr(event, "block_id", "") or ""
+        if block_id not in groups:
+            groups[block_id] = []
+            order.append(block_id)
+        groups[block_id].append(event)
+    out: list[EventBase] = []
+    for block_id in order:
+        group = groups[block_id]
+        has_start = any(isinstance(e, ThinkingBlockStartEvent) for e in group)
+        has_end = any(isinstance(e, ThinkingBlockEndEvent) for e in group)
+        if has_start and has_end:
+            out.extend(group)
+            continue
+        text = "".join(
+            e.delta for e in group if isinstance(e, ThinkingBlockDeltaEvent)
+        )
+        reply_id = getattr(group[0], "reply_id", "") or ""
+        out.extend(
+            [
+                ThinkingBlockStartEvent(reply_id=reply_id, block_id=block_id),
+                ThinkingBlockDeltaEvent(
+                    reply_id=reply_id,
+                    block_id=block_id,
+                    delta=text,
+                ),
+                ThinkingBlockEndEvent(reply_id=reply_id, block_id=block_id),
+            ],
+        )
+    return out
+
+
+def _visible_block_texts(
+    events: list[EventBase],
+    block_deltas: dict[str, list[str]],
+) -> list[str]:
+    """按块返回**用户可见**的正文（``TEXT_BLOCK_END`` 载荷优先）。
+
+    Args:
+        events (`list[EventBase]`): 本轮缓冲的文本块事件。
+        block_deltas (`dict[str, list[str]]`): ``block_id`` → 该块的 DELTA 列表。
+
+    Returns:
+        `list[str]`: 每块一段可见文本，顺序与块首次出现一致。
+
+    ⚠️ 为什么要**逐块**（2026-10-05 对抗验证 #11/#21/#27）：残留扫描的
+    基准必须同时满足两条 —— 「载荷改了块内容就按载荷算」（否则漏，
+    对抗验证 P5）与「同一处文本不重复计数 / 不跨块拼接」（否则虚高、
+    还会造出块边界上不存在的伪候选）。按块取其生效文本是唯一同时满足
+    两者的取法。
+
+    ⚠️ 没有 DELTA 的块（只有 START/END）也要收进来：它的可见内容就是
+    载荷本身。
+    """
+    order: list[str] = []
+    payloads: dict[str, str] = {}
+    for event in events:
+        block_id = getattr(event, "block_id", "") or ""
+        if not block_id:
+            continue
+        if isinstance(event, TextBlockEndEvent) and event.text is not None:
+            payloads[block_id] = event.text
+        if block_id not in order:
+            order.append(block_id)
+    return [
+        payloads.get(block_id) or "".join(block_deltas.get(block_id, ()))
+        for block_id in order
     ]
 
 
@@ -1845,6 +3497,9 @@ class ReplyGuardMiddleware(MiddlewareBase):
                     state.reply_id = event.reply_id
                     state.emitted = False
                     state.emitted_text = ""
+                    state.emitted_blocks = []
+                    state.emitted_thinking = ""
+                    state.pending_marker_prefix = ""
                     state.drafts = []
                     state.retries = 0
                     state.pending_problem = None
@@ -1873,32 +3528,154 @@ class ReplyGuardMiddleware(MiddlewareBase):
                         state.round_text.append(event.delta)
                     continue
 
+                if isinstance(
+                    event,
+                    (
+                        ThinkingBlockStartEvent,
+                        ThinkingBlockDeltaEvent,
+                        ThinkingBlockEndEvent,
+                    ),
+                ):
+                    # ⚠️ 思考链也要过标记清洗（2026-10-05 对抗验证发现的
+                    # 旁路）：它**用户可见**（前端直接渲染 ``block.thinking``）
+                    # 且**会落库**（服务端对每个事件都 append_event）。早先
+                    # 只缓冲文本块，思考块的 delta 走泛型 ``yield`` 原样放行
+                    # —— 同样的复读标记放进思考链就能绕过整道守卫，而该轮
+                    # 还会被记成 ``clean``（实测复现）。
+                    #
+                    # ⚠️ 缓冲到**块结束**才结算：那时才拼得出完整文本，
+                    # 标记跨分片也不会漏。结算只洗标记，**不**跑草稿剥离/
+                    # 接地闸门 —— 思考链本来就该是推理过程，正文那套内容
+                    # 审计不该管它（见 :meth:`_settle_thinking`）。
+                    state.round_thinking_events.append(event)
+                    if isinstance(event, ThinkingBlockDeltaEvent):
+                        state.round_thinking.append(event.delta)
+                    if isinstance(event, ThinkingBlockEndEvent):
+                        for flushed in self._settle_thinking(agent, state):
+                            yield flushed
+                    continue
+
                 if isinstance(event, ToolCallStartEvent):
                     # 工具调用必须照常透传：它是用户可见的执行过程（思考链），
                     # 也是服务端记录本条回复「做过什么」的依据。
+                    #
+                    # ⚠️ 名字先洗再记账（2026-10-05 缺口 ②）：它是模型可写、
+                    # 用户可见、还会落库的字段（见 _scrub_tool_call_name）。
+                    # 洗过的名字同时用于 round_tools / policy_tools —— 守卫
+                    # 的判据看到的名字必须与用户、与库里的是同一个。
+                    event, name_markers = _scrub_tool_call_name(event)
+                    if name_markers:
+                        observe_reply_guard("stripped_internal_marker")
+                        state.round_marker_stripped = True
+                        logger.warning(
+                            "回复守卫剥掉工具名里的 %d 处内部标记（agent=%s，"
+                            "工具调用块）。",
+                            name_markers,
+                            getattr(agent, "name", "?"),
+                        )
                     state.round_tools.append(event.tool_call_name)
                     if event.tool_call_name in _POLICY_LIMIT_TOOLS:
                         # 记「调过」而不是「调成功」：工具失败时给出的
                         # 编造数字同样要拦（失败时正文本就该说查不到）。
                         state.policy_tools.append(event.tool_call_name)
+                    # 同一个 id 复用（模型重发了一次同名调用）时清掉旧流
+                    # 缓冲，否则新旧参数会拼出一段谁都没生成过的文本
+                    # （与 ``src/chains/events.py`` 的同名处理同策）。
+                    state.tool_stream_pending.pop(("call", event.tool_call_id), None)
                     yield event
                     continue
 
-                if isinstance(event, ToolResultTextDeltaEvent):
-                    if state.tool_text_chars < _MAX_TOOL_TEXT_CHARS:
+                if isinstance(event, ToolResultStartEvent):
+                    # ⚠️ 结果块带着**同一个名字**再来一次（缺口 ②）：上游
+                    # 分别写进 ToolCallBlock.name 与 ToolResultBlock.name，
+                    # 两个字段都会落库、都会在界面上当标题 —— 所以这里再洗
+                    # 一次、再计一次（同一处标记在**两个字段**里各出现一次，
+                    # 记 2 处不算多报）。
+                    event, name_markers = _scrub_tool_call_name(event)
+                    if name_markers:
+                        observe_reply_guard("stripped_internal_marker")
+                        state.round_marker_stripped = True
+                        logger.warning(
+                            "回复守卫剥掉工具名里的 %d 处内部标记（agent=%s，"
+                            "工具结果块）。",
+                            name_markers,
+                            getattr(agent, "name", "?"),
+                        )
+                    state.tool_stream_pending.pop(("result", event.tool_call_id), None)
+                    yield event
+                    continue
+
+                if isinstance(event, (ToolCallDeltaEvent, ToolResultTextDeltaEvent)):
+                    # ⚠️ 工具的两条 delta 通道都走「留尾」缓冲清洗，而不是
+                    # 逐片就地洗 —— 逐片洗会被流式分片绕过（见
+                    # _feed_tool_stream 的说明）。工具返回的**原始**分片照常
+                    # 进账本：它是接地闸门（无依据金额）的来源，清洗只动
+                    # 标记、不动数字。
+                    kind = (
+                        "call" if isinstance(event, ToolCallDeltaEvent) else "result"
+                    )
+                    if kind == "result" and state.tool_text_chars < _MAX_TOOL_TEXT_CHARS:
                         state.tool_text.append(event.delta)
                         state.tool_text_chars += len(event.delta)
+                    for flushed in self._feed_tool_stream(
+                        state,
+                        kind,
+                        event.tool_call_id,
+                        getattr(event, "reply_id", "") or state.reply_id,
+                        event.delta or "",
+                        final=False,
+                    ):
+                        yield flushed
+                    continue
+
+                if isinstance(event, (ToolCallEndEvent, ToolResultEndEvent)):
+                    kind = "call" if isinstance(event, ToolCallEndEvent) else "result"
+                    for flushed in self._feed_tool_stream(
+                        state,
+                        kind,
+                        event.tool_call_id,
+                        getattr(event, "reply_id", "") or state.reply_id,
+                        "",
+                        final=True,
+                    ):
+                        yield flushed
                     yield event
                     continue
 
                 if isinstance(event, ModelCallEndEvent):
+                    # ⚠️ 先冲工具流：End 事件缺失时（工具异常）缓冲的文本
+                    # 不能无声蒸发（见 _flush_tool_streams）。
+                    for flushed in self._flush_tool_streams(state):
+                        yield flushed
+                    # ⚠️ 再冲思考块：正常情况下它已经在 THINKING_BLOCK_END
+                    # 结算过，这里兜的是「块没发结束事件」的形状 —— 不冲的话
+                    # 下面的 begin_round() 会把已缓冲的思考链**静默丢掉**
+                    # （那是比标记泄漏更重的回归：整条思考链消失）。
+                    for flushed in self._settle_thinking(agent, state):
+                        yield flushed
                     for settled in await self._settle_round(agent, state):
                         yield settled
-                    state.begin_round()
+                    # ⚠️ ``flush_clean=False``：工具结果事件在 ModelCallEnd
+                    # **之后**才到（生产顺序），``clean`` 的记账要等它们，
+                    # 见 _ReplyState.pending_clean。
+                    state.begin_round(flush_clean=False)
                     yield event
                     continue
 
                 if isinstance(event, ReplyEndEvent):
+                    # 工具流的最后一道安全网：还没收到配对 End 的流在这里
+                    # 整段结算（正常链路已经为空，见 _flush_tool_streams）。
+                    for flushed in self._flush_tool_streams(state):
+                        yield flushed
+                    # ⚠️ 还扣在手里的半截标记前缀在这里定性（见
+                    # _resolve_pending_marker_prefix）：确信是标记族的碎片
+                    # 丢弃并计入残留；宽判据认下、窄判据不认的原样发出
+                    # （合成文本块，绝不静默丢内容）。
+                    for resolved in self._resolve_pending_marker_prefix(agent, state):
+                        yield resolved
+                    # 回复边界：待记账的 ``clean`` 在这里定性 —— 排在工具流
+                    # 结算**之后**，末段载荷里的剥离仍能把它压掉。
+                    state.flush_pending_clean()
                     if self._should_retry(agent, state, event):
                         # ⚠️ 刻意**不** yield 这个事件 —— 这就是「吞掉」，
                         # 框架因此会再跑一轮（见模块文档「重试机制」）。
@@ -1915,7 +3692,30 @@ class ReplyGuardMiddleware(MiddlewareBase):
                     yield event
                     continue
 
-                yield event
+                # 工具调用参数（``TOOL_CALL_DELTA``）是最后一条带文本载荷、
+                # 又不走缓冲的路径 —— 上屏副本同样过一遍清洗。
+                # ⚠️ 同族的可落库字段一起过（2026-10-05 Round-4 的
+                # toolname / completeness 两条镜片）：``HintBlockEvent.hint``
+                # 是第五个上屏+落库的通道，``DataBlockStartEvent.name`` /
+                # ``media_type``、``ToolResultDataDeltaEvent.media_type``
+                # 与工具名同类。先洗，洗不掉又像标记开头的按宽判据清掉。
+                event, hint_markers = _scrub_hint_event(event)
+                event, field_markers = _scrub_named_fields(event)
+                if hint_markers + field_markers:
+                    observe_reply_guard("stripped_internal_marker")
+                    state.round_marker_stripped = True
+                    logger.warning(
+                        "回复守卫剥掉 %d 处内部标记（hint/name/media_type 字段，"
+                        "agent=%s）。",
+                        hint_markers + field_markers,
+                        getattr(agent, "name", "?"),
+                    )
+                hint_text = _hint_text(event)
+                if hint_text:
+                    # 提示块也是用户可见 + 落库的文本：给残留扫描一个入口
+                    # （``_report`` 只扫 emitted_blocks / emitted_thinking）。
+                    state.emitted_blocks.append(hint_text)
+                yield _scrub_event_delta(event)
         finally:
             # ⚠️ 放在 ``finally`` 里：模型侧抛异常时 ``async for`` 直接向上
             # 穿透，收尾上报不能因此被跳过 —— 恰恰是异常那一次最需要留下
@@ -1924,11 +3724,430 @@ class ReplyGuardMiddleware(MiddlewareBase):
             # 发出去比不发更糟。此时由服务层的失败话术兜底（已核实的框架行为：
             # 普通异常不发 ``ReplyEndEvent``，``agentscope/agent/_agent.py:1271-1304`` 只捕获
             # ``CancelledError``），这是**有意**的取舍，不是遗漏。
+            #
+            # ⚠️ 待记账的 ``clean`` 也要在这里定性：正常链路已在 ``ReplyEnd``
+            # 冲过（此处是无害的二次调用），异常/取消路径则只有这一次机会
+            # —— 少了它，最后那轮的 ``clean`` 会凭空消失（见 pending_clean）。
+            state.flush_pending_clean()
+            # ⚠️ 扣着的半截前缀同样只有这一次机会（2026-10-05 Round-4 的
+            # completeness critic）：没有 ReplyEndEvent 的异常/取消路径上，
+            # _resolve_pending_marker_prefix 从不执行 —— 少了这一笔，扣着的
+            # 内容既没上屏、也没记账，**静默消失**。正常链路已清空，空操作。
+            self._discard_pending_marker_prefix(agent, state)
             self._report(state)
 
     # --------------------------------------------------------------------------
     # 本轮结算
     # --------------------------------------------------------------------------
+    def _feed_tool_stream(
+        self,
+        state: _ReplyState,
+        kind: str,
+        call_id: str,
+        reply_id: str,
+        delta: str,
+        *,
+        final: bool,
+    ) -> list[EventBase]:
+        """把工具通道的一段流式文本喂进「留尾」缓冲，返回可安全发出的事件。
+
+        Args:
+            state (`_ReplyState`): 回复状态（就地修改缓冲）。
+            kind (`str`): ``"call"``（调用参数）或 ``"result"``（返回文本）。
+            call_id (`str`): 工具调用 id（分片的归属键）。
+            reply_id (`str`): 合成事件用的回复 id。
+            delta (`str`): 本次新到的分片（``final`` 时传空串）。
+            final (`bool`): 是否已到该流结尾（``ToolCallEndEvent`` /
+                ``ToolResultEndEvent``）—— 到了就整段结算，不再留尾。
+
+        Returns:
+            `list[EventBase]`: 0 或 1 个 delta 事件；空列表表示「还在留尾，
+            暂时没有可安全发出的文本」。
+
+        ⚠️ 为什么要留尾：只洗「整处标记落在同一个 delta 里」会被流式分片
+        绕过（2026-10-05 对抗验证 P5 实测：``'{"note": "[tool_result clea'``
+        + ``'red by postprune]"}'`` 两片各自干净，拼起来完整标记上屏**且
+        落库**）。缓冲保留最近 :data:`_TOOL_STREAM_HOLDBACK` 个字符：标记
+        只要长度 ≤ 保留尾长，收全的那一刻必然整处落在缓冲里，一次删干净。
+
+        ⚠️ 边界用 :data:`_STREAM_EDGE_GUARD` 哨兵包住：缓冲区的切口不是
+        文本边界，直接洗会让接缝规则把切口当文首/文尾处理（吞掉留给
+        前/后文的白）。
+
+        ⚠️ **成对的 system 标签**不会因为尾长小于 ③ 的 4000 字上限而漏
+        （2026-10-05 对抗验证 #13，high）：缓冲遇到「最后一个开标签还没有
+        配对的闭标签」时**整段原样等待**（上限 :data:`_SYSTEM_PAIR_MAX_SPAN`
+        —— 再长 ③ 也配不上，不再空等），闭标签一到就整对剥掉。旧实现没有
+        等待窗口：④ 先把孤立开标签删掉，等闭标签分片到达时 ③ 永远看不到
+        整对，中间那段内部指令**原样上屏且落库**（实测两分片
+        ``'<system-reminder>INTERNAL RULES…'`` + ``'…</system-reminder>'``）。
+
+        ⚠️ 内容超过 4000 字上限的成对标签（④ 删标签、内容留下）：按**起点
+        归属**在清洗前数一笔进 ``tool_residual``（2026-10-05 对抗验证 #23；
+        与正文通道的 :func:`_oversize_system_pair_count` 同一口径）。
+        此前只有「等待超时」那一次会记，而完整到达的超长对（一条 delta
+        就收全）根本走不到那个分支 —— 内容上屏、计数为 0。
+        """
+        key = (kind, call_id)
+        region = state.tool_stream_pending.get(key, "") + delta
+        if not region:
+            return []
+        # ⚠️ **跨通道缝合**（2026-10-05 Round-4 第 14 号缺陷）：标记的一半
+        # 留在上一段思考/正文的扣留里、另一半从工具载荷进来时，两条通道
+        # 各自留尾、谁也看不到整处标记，拼起来完整上屏。这里把扣留接到
+        # 载荷前面**一起判** —— 只有标记确实横跨这条缝（起点在扣留里、
+        # 终点在载荷里）才消费它；否则原样留着（它按正文通道的规则在
+        # 自己的边界上结算，不归这里管）。
+        if state.pending_marker_prefix:
+            carry = state.pending_marker_prefix
+            span = _first_marker_span(carry + region)
+            if span is not None and span[0] < len(carry) <= span[1]:
+                region = carry + region
+                state.pending_marker_prefix = ""
+                logger.warning(
+                    "回复守卫：一处内部标记横跨「上一段正文/思考 → 工具%s」的"
+                    "边界，已把两半放进同一次清洗（扣留 %d 字 + 载荷 %d 字）。",
+                    "调用参数" if kind == "call" else "返回文本",
+                    len(carry),
+                    len(delta),
+                )
+        if not final:
+            open_end = _pending_system_open_end(region)
+            if 0 <= open_end:
+                if len(region) - open_end <= _SYSTEM_PAIR_MAX_SPAN:
+                    # 原样（**未清洗**）留尾：清洗会把开标签删掉，配对就
+                    # 永远不可能了。等待期间不发出、不计数 —— 这段文本
+                    # 还没有任何一部分上屏，整段处理时一次性结算。
+                    state.tool_stream_pending[key] = region
+                    return []
+                # 等待超时：开标签会被 ④ 删掉、后面的内容会原样发出 ——
+                # 记一笔残留让「可能泄漏了一段系统标签内容」可见。只记在
+                # 这一次：走完正常路径后开标签已不在缓冲里，不会重复。
+                state.tool_residual += 1
+                logger.warning(
+                    "回复守卫：工具%s里出现一个内容超长的 system 开标签"
+                    "（%d 字仍未见配对闭标签），标签会被剥掉、内容会留在载荷里。",
+                    "调用参数" if kind == "call" else "返回文本",
+                    len(region) - open_end,
+                )
+        scrubbed, removed = _strip_internal_markers(
+            _STREAM_EDGE_GUARD + region + _STREAM_EDGE_GUARD,
+        )
+        body = scrubbed[1:-1] if removed else region
+        if removed:
+            observe_reply_guard("stripped_internal_marker")
+            state.round_marker_stripped = True
+            logger.warning(
+                "回复守卫剥掉 %d 处内部标记（工具%s，剥前 %d 字、剥后 %d 字）。",
+                removed,
+                "调用参数" if kind == "call" else "返回文本",
+                len(region),
+                len(body),
+            )
+        if final:
+            # ⚠️ 载荷**结尾**是一段确信的半截标记（2026-10-05 Round-4）：它的
+            # 下半截只可能从别的通道来，而这条流已经收尾、不可能再等到 ——
+            # 工具载荷不能扣（扣了会改掉工具参数/返回值），所以只计数 + 告警，
+            # 不改载荷（「宁漏不删」的另一面：这里的取舍方向与正文相反，
+            # 载荷属于执行链可见性，改它比漏一个碎片更糟）。
+            tail_head = _pending_marker_prefix_start(body)
+            if tail_head >= 0 and _is_confident_marker_head(body[tail_head:]):
+                # ⚠️ 只补**残留扫描认不出**的形状（2026-10-05 自查发现的
+                # 双计）：本函数末尾的起点归属扫描会把 ``[tool_result clea``
+                # 这类尾碎片数进去，这里再加一笔就是同一个碎片数两遍
+                # （实测日志「工具载荷 2 处」）。``[inline clea`` 这种
+                # 扫描认不出的碎片才由这里补记 —— 两处加起来恰好一笔。
+                if not _residual_marker_count(body[tail_head:]):
+                    state.tool_residual += 1
+                logger.warning(
+                    "回复守卫：工具%s的结尾是一段没写完的内部标记（%d 字），"
+                    "下半截没有到达这条流 —— 载荷原样发出、计入残留。",
+                    "调用参数" if kind == "call" else "返回文本",
+                    len(body) - tail_head,
+                )
+            emit, tail = body, ""
+        elif len(body) > _TOOL_STREAM_HOLDBACK:
+            emit = body[:-_TOOL_STREAM_HOLDBACK]
+            tail = body[-_TOOL_STREAM_HOLDBACK:]
+        else:
+            emit, tail = "", body
+        state.tool_stream_pending[key] = tail
+        if not emit:
+            return []
+        # 残留候选（形状表外）按**起点归属**计数（2026-10-05 对抗验证
+        # #14/#18）：旧实现只扫 ``emit``，骑在 512 字切口上的候选（起点在
+        # emit、结尾还在 tail 里）两边都数不到。窗口取整段 ``body``（候选
+        # 要完整上下文才成形），只数起点落在 emit 里的 —— 起点一旦发出，
+        # 就没有第二次计数机会；起点在 tail 里的留到下次再数，不会重复。
+        state.tool_residual += _residual_marker_count_in_prefix(body, len(emit))
+        # ⚠️ 超长成对标签的**内容**（2026-10-05 对抗验证 #23）：③ 因 4000
+        # 字上限不命中、④ 只删两个标签 —— 内容原样发出，而它没有标签形状，
+        # 残留扫描（扫的是发出文本）永远认不出来。只能在**清洗前**的缓冲上
+        # 数，按起点归属切给「本轮已发出」的那一段（见
+        # :func:`_oversize_system_pair_count_in_prefix`）。
+        oversize_pairs = _oversize_system_pair_count_in_prefix(
+            region,
+            len(region) - len(tail),
+        )
+        if oversize_pairs:
+            state.tool_residual += oversize_pairs
+            logger.warning(
+                "回复守卫：工具%s里有一段超长成对 system 标签（内容超过 4000 字"
+                "上限），标签会被剥掉但内容会留在载荷里（%d 处）。",
+                "调用参数" if kind == "call" else "返回文本",
+                oversize_pairs,
+            )
+        cls = _TOOL_STREAM_DELTA_CLASSES[kind]
+        return [cls(reply_id=reply_id, tool_call_id=call_id, delta=emit)]
+
+    def _flush_tool_streams(self, state: _ReplyState) -> list[EventBase]:
+        """把还没收尾的工具流整段结算（配对 End 事件缺失时的安全网）。
+
+        Args:
+            state (`_ReplyState`): 回复状态。
+
+        Returns:
+            `list[EventBase]`: 要发出的 delta 事件（可能为空）。
+
+        ⚠️ 调用点是 ``ModelCallEndEvent`` 与 ``ReplyEndEvent``：正常链路里
+        每条流都有配对的 End 事件、这里无事可做；End 缺失（工具异常、
+        上游截断）时，已缓冲的文本要么在这里发出、要么随回复一起消失。
+        这里选发出，理由是工具载荷属于「执行链可见性」，少一段比多一段
+        更糟的方向与正文相反（正文的半句话按设计丢弃）。
+        """
+        flushed: list[EventBase] = []
+        for kind, call_id in sorted(state.tool_stream_pending):
+            if not state.tool_stream_pending[(kind, call_id)]:
+                continue
+            flushed.extend(
+                self._feed_tool_stream(
+                    state,
+                    kind,
+                    call_id,
+                    state.reply_id,
+                    "",
+                    final=True,
+                ),
+            )
+        return flushed
+
+    def _resolve_pending_marker_prefix(
+        self,
+        agent: Any,
+        state: _ReplyState,
+    ) -> list[EventBase]:
+        """回复结束时，给还扣在手里的半截前缀**定性**（丢弃或原样发出）。
+
+        Args:
+            agent (`Any`): agent 实例（日志与 ``reply_id`` 解析用）。
+            state (`_ReplyState`): 回复状态。
+
+        Returns:
+            `list[EventBase]`: 宽判据认下、窄判据不认的碎片要**原样发出**
+            （0 或 1 个合成文本块）；确信是标记族的碎片丢弃、不发事件。
+
+        ⚠️ 两种处置按**窄判据**（:func:`_is_confident_marker_head`）分流
+        （2026-10-05 Round-4 第二/三号缺陷的正面修补）：
+
+            · 确信是标记族（``[tool…`` / ``[inline…`` / system 标签头，
+              都 ⊆ 清洗器剥得掉的形状）：到了回复结束还没等到下半截，
+              说明它就是个碎片 —— 丢弃 + 计入 ``residual_precount`` +
+              WARNING，屏幕上不会出现半截 ``[tool_result clea``；
+            · 其余（宽判据扣下的 ``[Luggage clea`` 这类，可能是真内容）：
+              **不删**，合成一个文本块原样发出 + 进 ``emitted_blocks``
+              残留扫描 + WARNING。旧实现在这里一律删除，实测把 18 字
+              推理连同半截标记一起删掉、指标还记 ``clean``。
+        """
+        prefix = state.pending_marker_prefix
+        if not prefix:
+            return []
+        state.pending_marker_prefix = ""
+        agent_name = getattr(agent, "name", "?")
+        if _is_confident_marker_head(prefix):
+            count = _residual_marker_count(prefix) or 1
+            state.residual_precount += count
+            logger.warning(
+                "回复守卫丢弃了回复结尾处一段没写完的内部标记前缀"
+                "（%d 处、%d 字，agent=%s）—— 它没有等到下半截，不会上屏。",
+                count,
+                len(prefix),
+                agent_name,
+            )
+            return []
+        state.emitted_blocks.append(prefix)
+        logger.warning(
+            "回复守卫把回复结尾处一段扣着的半截标记前缀原样发出"
+            "（%d 字，agent=%s）—— 它不像标记族开头，删了会丢内容。",
+            len(prefix),
+            agent_name,
+        )
+        return _synth_text_events(
+            self._resolve_reply_id(agent, state),
+            prefix,
+            self._next_block_id(state, "carry"),
+        )
+
+    def _discard_pending_marker_prefix(self, agent: Any, state: _ReplyState) -> None:
+        """异常/取消路径的收尾：把扣在手里的半截前缀**只记账**地丢掉。
+
+        Args:
+            agent (`Any`): agent 实例（日志用）。
+            state (`_ReplyState`): 回复状态。
+
+        ⚠️ 为什么需要（2026-10-05 Round-4 的 completeness critic）：没有
+        ``ReplyEndEvent`` 的异常/取消路径上，``_resolve_pending_marker_prefix``
+        从不执行 —— 扣着的半截前缀既没上屏、也没记账，**静默消失**。
+        异常路径本来就不补发缓冲文本（见 ``on_reply`` 的 ``finally``
+        注释），所以这里与正文同策：文本随中止的回复一起作废，但「丢了
+        什么」必须看得见 —— 确信族按 ``or 1`` 计数，宽族按残留候选计数。
+        正常链路已在 ``ReplyEnd`` 定性过（``pending_marker_prefix`` 已清空），
+        此处是无害的空操作。
+        """
+        prefix = state.pending_marker_prefix
+        if not prefix:
+            return
+        state.pending_marker_prefix = ""
+        if _is_confident_marker_head(prefix):
+            count = _residual_marker_count(prefix) or 1
+        else:
+            count = _residual_marker_count(prefix)
+        if not count:
+            return
+        state.residual_precount += count
+        logger.warning(
+            "回复守卫在异常/取消路径上丢弃了 %d 处没写完的内部标记前缀"
+            "（%d 字，agent=%s）—— 回复已中止、文本按设计不发，此处只记账。",
+            count,
+            len(prefix),
+            getattr(agent, "name", "?"),
+        )
+
+    def _settle_thinking(self, agent: Any, state: _ReplyState) -> list[EventBase]:
+        """结算当前思考块缓冲：只洗内部标记，其余原样。
+
+        Args:
+            agent (`Any`): agent 实例（日志与 ``reply_id`` 解析用）。
+            state (`_ReplyState`): 回复状态（就地清空思考缓冲）。
+
+        Returns:
+            `list[EventBase]`: 要发出的事件；没有缓冲时是空列表。
+
+        ⚠️ 与 :meth:`_settle_round` 的分工是**刻意**的：
+
+            · 思考链只洗**内部标记** —— 它用户可见（前端直接渲染
+              ``block.thinking``）且会落库，标记不能上屏；
+            · **不**跑草稿剥离、可用性判据和两个闸门 —— 那些判的是「这段
+              文字能不能当答复」（「我先查一下」这类措辞在思考链里是
+              **正常**的推理），拿去审思考链会把正常推理整段判死。
+
+        ⚠️ 洗过之后**重新合成**而不是复用原件（与 ``_settle_round`` 末尾
+        判据同一个道理：发旧事件 = 没洗）。block id 换成 ``think-`` 前缀：
+        原件从未发出，用原 id 不会撞块，但换前缀让「流里看到这个 id 就是
+        洗过的」一眼可查。
+
+    ⚠️ 干净路径**也要补结构**（2026-10-05 对抗验证 #5/#9）：剥过标记的
+    路径一直合成完整三件套，干净路径却原样透传 —— 上游块缺
+    ``THINKING_BLOCK_START``/``END`` 时落库侧整块蒸发（缺 START）或永远
+    悬着（缺 END），同一个缺陷只修了一半。补全由
+    :func:`_complete_thinking_blocks` 做：结构完整的块**原样**返回（保住
+    原 id 与事件对象），只重建残缺的块。
+
+        ⚠️ 异常路径下缓冲的思考块**按设计丢弃**（与正文同策，见 ``on_reply``
+        里 ``finally`` 的注释）：半句话发出去比不发更糟。
+        """
+        events = state.round_thinking_events
+        buffered = "".join(state.round_thinking)
+        state.round_thinking_events = []
+        state.round_thinking = []
+        if not events:
+            # 没有思考块：上一段扣下的半截标记前缀**保持扣着**（留给正文轮）。
+            return []
+        # ⚠️ 接上**上一次结算扣在手里的半截标记前缀**（块边界的缝，见
+        # :func:`_pending_marker_prefix_start`）：块边界上被拦腰截断的标记，
+        # 两半各自看都是「不是标记」，拼起来才是 —— 只有把两半放进同一次
+        # 清洗里才认得出。
+        carried_text = state.pending_marker_prefix
+        carried = bool(carried_text)
+        raw = carried_text + buffered
+        state.pending_marker_prefix = ""
+        # ⚠️ 超长成对 system 标签的残留也要在思考链记一笔（2026-10-05
+        # 对抗验证 #23 的同形状）：思考链同样上屏且落库，剥不干净时
+        # 内容会跟着思考链出去。与正文轮同一口径（剥离**前**、原文还
+        # 完整时数）。
+        oversize_pairs = _oversize_system_pair_count(raw)
+        if oversize_pairs:
+            state.residual_precount += oversize_pairs
+            logger.warning(
+                "回复守卫：思考链里有一段超长成对 system 标签（内容超过 4000 "
+                "字上限），标签会被剥掉但内容会留在答复里（agent=%s，%d 处）。",
+                getattr(agent, "name", "?"),
+                oversize_pairs,
+            )
+        # ⚠️ 扣尾必须在**清洗前**的原文上求（2026-10-05 Round-4 第一号
+        # 缺陷）：孤立 ``<system-*>`` 开标签会被 ④ 先删掉，清洗后再找就
+        # 永远找不到它 —— 旧实现在清洗后求起点，system 分支是死代码。
+        split_raw = _pending_marker_prefix_start(raw)
+        if split_raw >= 0:
+            body_raw, held_raw = raw[:split_raw], raw[split_raw:]
+        else:
+            body_raw, held_raw = raw, ""
+        cleaned, removed = _strip_internal_markers(body_raw)
+        # 清洗可能在结尾**新露出**半截（它前面那处完整标记被删掉之后）——
+        # 再扣一次；两段扣留按原文顺序拼接。
+        split_clean = _pending_marker_prefix_start(cleaned)
+        if split_clean >= 0:
+            cleaned, held_clean = cleaned[:split_clean], cleaned[split_clean:]
+        else:
+            held_clean = ""
+        held = held_clean + held_raw
+        if held:
+            state.pending_marker_prefix = held
+        # 扣来的半截前缀若没被下半截补齐：**不删**（2026-10-05 Round-4
+        # 第二/三号缺陷的正面修补）—— 内容原样发出 + WARNING。
+        # ⚠️ 这里**不**加 ``residual_precount``：碎片随本段上屏，残留扫描
+        # （第三模式的半截行锚）会数到它 —— 再加一处就是同一个碎片数两遍。
+        # 只有回复结束时**丢弃**的碎片（不上屏、扫描看不到）才自己记账。
+        if _confident_carry_survived(carried_text, cleaned):
+            logger.warning(
+                "回复守卫：上一段扣下的半截内部标记前缀在思考链里没有等到"
+                "下半截（%d 字，agent=%s）—— 按「不删内容」原则原样发出，"
+                "残留计数仍会扫到它。",
+                len(carried_text),
+                getattr(agent, "name", "?"),
+            )
+        if not removed and not carried and not held:
+            state.emitted_thinking += cleaned
+            return _complete_thinking_blocks(events)
+        if removed:
+            observe_reply_guard("stripped_internal_marker")
+            state.round_marker_stripped = True
+        logger.warning(
+            "回复守卫在思考链上剥掉 %d 处内部标记%s（agent=%s，剥前 %d 字、"
+            "剥后 %d 字）。",
+            removed,
+            f"、并把结尾半截标记前缀 {len(held)} 字扣到下一段一起判"
+            if held
+            else "",
+            getattr(agent, "name", "?"),
+            len(raw),
+            len(cleaned),
+        )
+        if not cleaned:
+            # 整块都是半截标记前缀（极端）：不发空块，扣着的部分随下一段走。
+            return []
+        state.emitted_thinking += cleaned
+        reply_id = self._resolve_reply_id(agent, state)
+        block_id = self._next_block_id(state, "think")
+        return [
+            ThinkingBlockStartEvent(reply_id=reply_id, block_id=block_id),
+            ThinkingBlockDeltaEvent(
+                reply_id=reply_id,
+                block_id=block_id,
+                delta=cleaned,
+            ),
+            ThinkingBlockEndEvent(reply_id=reply_id, block_id=block_id),
+        ]
+
     async def _settle_round(
         self,
         agent: Any,
@@ -1968,9 +4187,89 @@ class ReplyGuardMiddleware(MiddlewareBase):
         与 :data:`_PLACEHOLDER_MAX_RESIDUE` 那条「宁可放过空话，也不改坏
         真答案」的方向相反 —— 因为编造数值是**误导决策**，比少一段复述重。
         """
-        text = state.round_content()
-        if not text.strip() and not state.round_events:
+        raw_text = state.round_content()
+        if not raw_text.strip() and not state.round_events:
+            # ⚠️ 空轮**刻意不**清 ``pending_problem`` / ``ungrounded_limits``
+            # （2026-10-05 对抗验证 #17 的处置）：上一轮被拒的原因仍然
+            # **未解决**（模型此后没给出任何可用正文），重试提示正需要它
+            # ——「别再用那个编造的数值 + 回去读工具返回」在这轮同样适用。
+            # 清掉只会让提示退化成泛用版，重试更容易白费一轮。措辞上把
+            # 「你刚才那段答复」改成「你上一个候选答复」（见
+            # :data:`_UNGROUNDED_HINT_TEMPLATE`），空轮夹在中间时那句话也
+            # 是真的。``retry_<原因>`` 标签的语义就是「按**待解决**的原因
+            # 分类」，与 :func:`_request_retry` 的记账一致。
             return []
+
+        # ⚠️ 接上**上一次结算扣在手里的半截标记前缀**（块边界的缝，见
+        # :func:`_pending_marker_prefix_start`）：思考块与正文轮之间被拦腰
+        # 截断的标记，两半各自看都不是标记，拼起来才是。
+        carried_text = state.pending_marker_prefix
+        carried = bool(carried_text)
+        raw_text = carried_text + raw_text
+        state.pending_marker_prefix = ""
+
+        # ── 内部标记清洗（2026-10-05 缺陷 E，见 _strip_internal_markers）──
+        # ⚠️ 必须在**所有**下游判定之前做：工具轮丢弃判断、草稿剥离、两个
+        # 闸门、以及末尾「能不能复用原事件」的判据，看到的必须是同一份洗过
+        # 的文本。``raw_text`` 单独保留 —— 末尾的复用判据拿它当基准
+        # （洗过的文本一旦与模型原文不同，就绝不能复用模型的事件）。
+        #
+        # ⚠️ 扣尾必须在**清洗前**的原文上求（2026-10-05 Round-4 第一号
+        # 缺陷）：孤立 ``<system-*>`` 开标签会被 ④ 先删掉，清洗后再找就
+        # 永远找不到它 —— 旧实现在清洗后求起点，system 分支是死代码。
+        split_raw = _pending_marker_prefix_start(raw_text)
+        if split_raw >= 0:
+            body_raw, held_raw = raw_text[:split_raw], raw_text[split_raw:]
+        else:
+            body_raw, held_raw = raw_text, ""
+        text, marker_removed = _strip_internal_markers(body_raw)
+        # 清洗可能在结尾**新露出**半截（它前面那处完整标记被删掉之后）——
+        # 再扣一次；两段扣留按原文顺序拼接。
+        split_clean = _pending_marker_prefix_start(text)
+        if split_clean >= 0:
+            text, held_clean = text[:split_clean], text[split_clean:]
+        else:
+            held_clean = ""
+        held = held_clean + held_raw
+        if held:
+            state.pending_marker_prefix = held
+        # 扣来的半截前缀若没被下半截补齐：**不删**（2026-10-05 Round-4
+        # 第二/三号缺陷的正面修补）—— 内容原样发出（旧实现连同一段推理
+        # 一起删、指标记 clean）+ WARNING。
+        # ⚠️ 这里**不**加 ``residual_precount``：碎片随本轮上屏，残留扫描
+        # 会数到它 —— 只有回复结束时**丢弃**的碎片才自己记账（见
+        # ``_resolve_pending_marker_prefix``）。
+        if _confident_carry_survived(carried_text, text):
+            logger.warning(
+                "回复守卫：上一段扣下的半截内部标记前缀在正文里没有等到"
+                "下半截（%d 字，agent=%s）—— 按「不删内容」原则原样发出，"
+                "残留计数仍会扫到它。",
+                len(carried_text),
+                getattr(agent, "name", "?"),
+            )
+        if marker_removed:
+            observe_reply_guard("stripped_internal_marker")
+            state.round_marker_stripped = True
+            logger.warning(
+                "回复守卫剥掉 %d 处内部标记（agent=%s，剥前 %d 字、剥后 %d 字）。",
+                marker_removed,
+                getattr(agent, "name", "?"),
+                len(raw_text),
+                len(text),
+            )
+        # 「剥不干净的成对 system 标签」单独记账（2026-10-05 对抗验证 #23）：
+        # 内容超过 ③ 的 4000 上限时 ③ 不命中、④ 只删标签、内容留下 ——
+        # 那种残留没有标签形状，残留扫描认不出，只能在这里（剥离**前**、
+        # 原文还完整时）数。只计数，不改文本。
+        oversize_pairs = _oversize_system_pair_count(raw_text)
+        if oversize_pairs:
+            state.residual_precount += oversize_pairs
+            logger.warning(
+                "回复守卫：正文里有一段超长成对 system 标签（内容超过 4000 字上限），"
+                "标签会被剥掉但内容会留在答复里（agent=%s，%d 处）。",
+                getattr(agent, "name", "?"),
+                oversize_pairs,
+            )
 
         # 本轮的文字是不是「给用户看的确认复述」？
         # ⚠️ 判据全在 _round_needs_recitation（含框架内部机制工具的排除），
@@ -2080,14 +4379,84 @@ class ReplyGuardMiddleware(MiddlewareBase):
         # 动了文本却忘了自增 ``removed``，拿旧计数当判据就会把改过的文本
         # 配着原文的事件发出去（用户看到的还是旧文本 —— 而且是静默的）。
         # 拿文本本身比，这个错误就没有发生的余地。
-        if cleaned == text:
-            observe_reply_guard("clean")
+        #
+        # ⚠️ 2026-10-05（缺陷 E）：基准因此必须是 ``raw_text``（模型原文），
+        # 而不是洗过标记的 ``text`` —— 内部标记清洗正是「动了文本却没有
+        # ``removed`` 计数」的一条路径（见本方法开头的调用）。拿 ``text``
+        # 当基准的话，「只洗掉标记、没剥草稿」的轮次会让 ``cleaned == text``
+        # 成立，把**带标记的原始事件**原样发出：洗了，但白洗。
+        #
+        # ⚠️ 2026-10-05 对抗验证发现的旁路：``TextBlockEndEvent.text`` 与
+        # DELTA 拼接**不是一回事** —— ``Msg.append_event`` 在 TEXT_BLOCK_END
+        # 上会用 ``event.text`` **覆盖**块内容（agentscope message/_base.py），
+        # 而本轮所有判据只看 DELTA。END 载荷带标记、DELTA 干净时，
+        # ``cleaned == raw_text`` 成立、旧事件原样复用，标记随 END 载荷落库
+        # —— 实时流看着干净，**刷新后才冒出来**。今天没有生产路径会设置它
+        # （只有未接线的 realtime agent 设 ``final_text``），但「复用」一旦
+        # 带上脏载荷就是静默的，所以在这里堵死：END 载荷带标记 → 不许复用，
+        # 走下面的重新合成（合成事件的 END 用洗过的 ``cleaned`` 当 text）。
+        # ⚠️ 覆盖载荷按 **block_id 逐块**比（2026-10-05 对抗验证
+        # #11/#16/#21/#27）：旧实现拿每个载荷与**整轮** DELTA 拼接比 ——
+        # 多块轮里每一块的载荷都不等于整轮文本（真载荷也全被当成「覆盖」），
+        # 残留扫描因此重复计数、还造出跨块拼接的伪候选。载荷的归属是它自己
+        # 的块，比对基准必须是**本块**的 DELTA 拼接。
+        block_deltas: dict[str, list[str]] = {}
+        for event in state.round_events:
+            if isinstance(event, TextBlockDeltaEvent):
+                block_deltas.setdefault(event.block_id, []).append(event.delta)
+        end_overrides = [
+            event.text
+            for event in state.round_events
+            if isinstance(event, TextBlockEndEvent)
+            and event.text
+            and event.text != "".join(block_deltas.get(event.block_id, ()))
+        ]
+        end_payload_dirty = any(_has_internal_marker(t) for t in end_overrides)
+        # ⚠️ ``carried`` 也必须拦住复用（块边界缝合）：扣在手里的前缀是
+        # **上一段**的文字，本轮的原始事件里根本没有它 —— 复用等于把它
+        # 静默丢掉（用户看到的两块之间少一截）。
+        if cleaned == raw_text and not end_payload_dirty and not carried:
+            # ⚠️ ``round_marker_stripped`` 拦的是「同一轮里思考链/工具载荷
+            # 剥过标记，正文却记 clean」的自相矛盾（对抗验证实测过这个
+            # 组合）。clean 的语义是「一个字符都没改」，任何通道改过都不算。
+            #
+            # ⚠️ 但**记账推迟**（2026-10-05 对抗验证 #15）：工具结果事件在
+            # ``ModelCallEndEvent`` 之后才到，就地记 clean 的话，同一轮稍后
+            # 剥的标记追不回来。见 _ReplyState.pending_clean。
+            if not state.round_marker_stripped:
+                state.pending_clean = True
+            # ⚠️ END 载荷会**覆盖**块内容（Msg.append_event）：载荷与 DELTA
+            # 拼接不同时，用户刷新后看到的是载荷 —— 残留扫描必须算上它
+            # （对抗验证 P5 实测：载荷体含形状表外候选、指标全 clean）。
+            state.end_override_texts.extend(end_overrides)
+            state.emitted_blocks.extend(
+                _visible_block_texts(state.round_events, block_deltas),
+            )
             return list(state.round_events)
+        if end_payload_dirty:
+            # 指标与日志口径对齐：藏在 END 载荷里的标记确实被拦下了（只是
+            # DELTA 侧看不到），记成「没洗过」会让曲线骗人。处数按**实际**
+            # 剥掉的数算（2026-10-05 对抗验证 #12：旧实现硬编码 1，载荷里
+            # 多处/多块时少报）。
+            payload_markers = sum(
+                _strip_internal_markers(t)[1] for t in end_overrides
+            )
+            state.round_marker_stripped = True
+            if not marker_removed:
+                # DELTA 侧干净：这一处标记只存在于载荷里，指标记它。
+                marker_removed = max(1, payload_markers)
+                observe_reply_guard("stripped_internal_marker")
+            logger.warning(
+                "回复守卫拦下 %d 处藏在 TEXT_BLOCK_END 载荷里的内部标记（agent=%s）。",
+                max(1, payload_markers),
+                getattr(agent, "name", "?"),
+            )
 
         observe_reply_guard("stripped")
         logger.info(
-            "回复守卫剥掉 %d 段草稿（agent=%s，剩余 %d 字）。",
+            "回复守卫剥掉 %d 段草稿、%d 处内部标记（agent=%s，剩余 %d 字）。",
             removed,
+            marker_removed,
             getattr(agent, "name", "?"),
             len(cleaned),
         )
@@ -2096,6 +4465,10 @@ class ReplyGuardMiddleware(MiddlewareBase):
         # 都被剥离，用 ``reply_id`` 派生的固定 id 会**撞块** —— 第二个
         # ``TEXT_BLOCK_START`` 建不出新块时，后续 DELTA 会被 ``_find_block``
         # 归到第一个块上（``message/_base.py``）。
+        # ⚠️ 合成路径的可见文本是**洗过的整轮拼接**（``cleaned``），END 覆盖
+        # 载荷随原事件一起被换掉、根本没上屏 —— 所以这里记 ``cleaned`` 一项，
+        # 不是逐块记（``_visible_block_texts``）。
+        state.emitted_blocks.append(cleaned)
         return _synth_text_events(
             self._resolve_reply_id(agent, state),
             cleaned,
@@ -2492,7 +4865,19 @@ class ReplyGuardMiddleware(MiddlewareBase):
             return []
         reply_id = self._resolve_reply_id(agent, state)
         for draft in reversed(state.drafts):
-            cleaned, _ = _strip_drafts(draft)
+            # ⚠️ 防御性二洗（2026-10-05，缺陷 E）：``state.drafts`` 今天进来的
+            # 都是 ``_settle_round`` 洗过的文本，这里再洗一次是幂等的保险 ——
+            # 将来若有新路径直接往 ``drafts`` 里塞原文，兜底（比正文更晚、
+            # 更少人盯的一条路径）不会把标记重新抬给用户。
+            cleaned, marker_left = _strip_internal_markers(draft)
+            if marker_left:
+                observe_reply_guard("stripped_internal_marker")
+                logger.warning(
+                    "回复守卫兜底前又剥掉 %d 处内部标记（agent=%s）。",
+                    marker_left,
+                    getattr(agent, "name", "?"),
+                )
+            cleaned, _ = _strip_drafts(cleaned)
             if _answer_problem(cleaned) is not None:
                 continue
             if cleaned.strip() in state.blocked_texts:
@@ -2535,6 +4920,7 @@ class ReplyGuardMiddleware(MiddlewareBase):
             observe_reply_guard("fallback_from_draft")
             logger.warning("回复守卫用最后一版草稿兜底（长度 %d）。", len(cleaned))
             state.emitted_text += cleaned
+            state.emitted_blocks.append(cleaned)
             return _synth_text_events(
                 reply_id,
                 cleaned,
@@ -2543,6 +4929,7 @@ class ReplyGuardMiddleware(MiddlewareBase):
         observe_reply_guard("fallback_generic")
         logger.warning("回复守卫用固定话术兜底（本次回复没有任何可用内容）。")
         state.emitted_text += _FALLBACK_TEXT
+        state.emitted_blocks.append(_FALLBACK_TEXT)
         return _synth_text_events(
             reply_id,
             _FALLBACK_TEXT,
@@ -2558,12 +4945,16 @@ class ReplyGuardMiddleware(MiddlewareBase):
         Args:
             state (`_ReplyState`): 回复状态。
 
-        两件事：
+        三件事：
 
-            1. 统计**残留可疑段落**（段落中间的草稿、被保留下来的确认复述）；
-            2. 统计**疑似无依据的金额**（见 :func:`_ungrounded_amounts`）。
+            1. 统计**残留标记候选**（形状表**之外**、仍像标记的文本，见
+               :func:`_residual_marker_count`）—— 扫正文、思考链、
+               ``TEXT_BLOCK_END`` 覆盖载荷、工具载荷四处（都是上屏/落库
+               的通道），记 ``residual_internal_marker`` + WARNING；
+            2. 统计**残留可疑段落**（段落中间的草稿、被保留下来的确认复述）；
+            3. 统计**疑似无依据的金额**（见 :func:`_ungrounded_amounts`）。
 
-        ⚠️ 两件都**只上报，不改变行为**。理由见模块文档「能力边界」——
+        ⚠️ 三件都**只上报，不改变行为**。理由见模块文档「能力边界」——
         在拿到真实的误报率之前就拦截，会把正确答案也改坏。
 
         ⚠️ 审的是 ``emitted_text``（**用户实际看到的那段**），不是被丢掉的草稿。
@@ -2572,6 +4963,44 @@ class ReplyGuardMiddleware(MiddlewareBase):
         恰恰出现在发给用户的正文里。
         """
         answer = state.emitted_text
+        # ⚠️ 残留标记扫描（2026-10-05）：形状表**之外**、仍像标记的文本
+        # 只计数不删（见 _RESIDUAL_MARKER_PATTERNS）。模块文档原先声称这
+        # 类变种会落进 draft_paragraph_left_* —— 对抗验证实测不成立（那些
+        # 判据对它全为假，轮次被记成 clean、「模型复读标记」完全不可见），
+        # 这个计数器是那个承诺的**事实版**。扫的是「最终发出的文本」：
+        # 正文（**逐块**，见 :attr:`_ReplyState.emitted_blocks`）、思考链、
+        # 工具载荷（``tool_residual`` 已在流式清洗时逐段计好）。
+        #
+        # ⚠️ 正文不能拿 ``emitted_text``（整轮 DELTA 拼接）与 END 覆盖载荷
+        # 分两串扫（2026-10-05 对抗验证 #21）—— 载荷 ⊇ 正文时同一处候选
+        # 被算两遍（实测「用户可见 1 处、日志报 2 处」）；也不能把多块
+        # 拼成一串扫（#11 的 P4：块 1 结尾 ``[Luggage clea`` + 块 2 开头
+        # ``red by customs]`` 拼出块边界两边都不存在的伪候选）。逐块扫
+        # 两个坑都不踩：覆盖块取其载荷、其余块取本块 DELTA 拼接。
+        # ``end_override`` 仍留给日志的构成说明（字数），**不再另计**。
+        end_override = "".join(state.end_override_texts)
+        residual = (
+            sum(_residual_marker_count(t) for t in state.emitted_blocks)
+            + _residual_marker_count(state.emitted_thinking)
+            + state.tool_residual
+            # 剥离前就已知的残留（超长成对 system 标签，见
+            # _oversize_system_pair_count）—— 那段内容没有标签形状，
+            # 扫发出文本永远认不出来，只能在这里凭当时的账补上。
+            + state.residual_precount
+        )
+        if residual:
+            observe_reply_guard("residual_internal_marker")
+            logger.warning(
+                "回复守卫：发给用户的文本里仍有 %d 处形状表外的标记候选"
+                "（正文 %d 字、思考链 %d 字、END 覆盖载荷 %d 字、工具载荷 %d 处、"
+                "剥离前预记 %d 处）—— 请人工确认后决定是否扩形状表。",
+                residual,
+                len(answer),
+                len(state.emitted_thinking),
+                len(end_override),
+                state.tool_residual,
+                state.residual_precount,
+            )
         if not answer.strip():
             return
         classes = _classify_suspicious_paragraphs(answer)

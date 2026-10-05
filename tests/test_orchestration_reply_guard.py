@@ -24,13 +24,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator
 
 import pytest
 from agentscope.agent import Agent
 from agentscope.event import (
+    DataBlockStartEvent,
     EventBase,
+    HintBlockEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ReplyEndEvent,
@@ -38,10 +42,17 @@ from agentscope.event import (
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
+    ThinkingBlockDeltaEvent,
+    ThinkingBlockEndEvent,
+    ThinkingBlockStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResultEndEvent,
+    ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from agentscope.message import Msg, TextBlock, ToolCallBlock
+from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultState
 from agentscope.tool import Bash, Edit, Glob, Grep, Read, Write
 from agentscope.tool._builtin import ResetTools
 from agentscope.tool._task import TaskCreate, TaskGet, TaskList, TaskUpdate
@@ -59,11 +70,15 @@ from src.orchestration.reply_guard import (
     _classify_suspicious_paragraphs,
     _count_suspicious_paragraphs,
     _fold_width,
+    _has_internal_marker,
     _is_derived_total,
     _is_draft,
     _is_placeholder,
     _normalize_amount,
+    _residual_marker_count,
+    _ReplyState,
     _strip_drafts,
+    _strip_internal_markers,
     _ungrounded_amounts,
     _ungrounded_limit_claims,
 )
@@ -3309,4 +3324,3078 @@ def test_a_stale_prompt_record_does_not_exempt_anything() -> None:
 
     assert "15000" not in _visible(out), (
         "上一条回复的登记被当成了本次回复的豁免来源"
+    )
+
+
+# ==============================================================================
+# 五、内部标记清洗（2026-10-05 缺陷 E）
+# ==============================================================================
+
+#: 2026-10-05 线上工单的原文标记（见模块文档缺陷 E）：
+#: 模型在工具轮之后把 agent 框架的「工具结果已清理」标记当正文复读了出来。
+_MEASURED_MARKER = "[tool_result cleared by postprune]"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "expected_removed"),
+    [
+        # ① 线上原文：标记自成一段 + 后接正常答复
+        (
+            f"{_MEASURED_MARKER}\n\n好的，杭州两天出差。还差两个信息：\n\n"
+            "**你从哪个城市出发？**",
+            "好的，杭州两天出差。还差两个信息：\n\n**你从哪个城市出发？**",
+            1,
+        ),
+        # ① 同族变体：qwen-code 公开存在的标记（形状相同、机制名不同）
+        ("[Old tool result content cleared]\n\n订单已确认。", "订单已确认。", 1),
+        # ① 变体：带统计的清理标记 / 其他清理动词
+        ("[tool output cleared: 4213 chars]", "", 1),
+        ("[tool_result pruned]", "", 1),
+        ("[tool_result truncated by postprune]", "", 1),
+        ("[Old inline media cleared: image/png]", "", 1),
+        # ① 词表补漏（2026-10-05 对抗验证 F7）：清理动词变体此前整族漏网
+        ("[tool_result cleaned up by the system]", "", 1),
+        ("[tool result removed to save space]", "", 1),
+        ("[tool_result shortened]", "", 1),
+        ("[tool result summarized]", "", 1),
+        # ① 全角方括号
+        ("［tool_result cleared by postprune］好的。", "好的。", 1),
+        # ② 句式兜底：机制名不可穷举。
+        # ⚠️ 2026-10-05（F6）：这两个参数是**纯 ②** 命中 —— 名词不在 ① 表里，
+        # 删掉 ② 正则它们必红。此前的 ``[context cleared by microcompaction]``
+        # 是 ① 顺手命中的（逐模式归因 [1,1,0,0]），把 ② 整条删掉测试仍全绿，
+        # 该参数的变异声明失实（见下方函数 docstring）。
+        ("[cache cleared by sanitizer]", "", 1),
+        ("[history cleared by microcompaction]", "", 1),
+        ("[context cleared by microcompaction]\n\n你好。", "你好。", 1),
+        # ③ 系统标签（成对）——框架的注入块/背景工具占位符形状
+        (
+            "<system-reminder>Tool 'x' is running in background (id=1)"
+            "</system-reminder>\n\n好的。",
+            "好的。",
+            1,
+        ),
+        # ④ 系统标签（残缺）
+        ("好的。<system-info>", "好的。", 1),
+        # 同段混排：标记与真答案在一段里 —— 只删跨度，不整段删
+        (
+            "好的。[tool_result cleared by postprune] 你从哪个城市出发？",
+            "好的。 你从哪个城市出发？",
+            1,
+        ),
+        # 多处命中
+        (
+            f"{_MEASURED_MARKER}\n\n好的。\n\n[tool_result pruned]",
+            "好的。",
+            2,
+        ),
+        # ── 假阳性防护：这些一个字符都不能动 ──
+        ("【重点】酒店差标是 600 元/晚。", "【重点】酒店差标是 600 元/晚。", 0),
+        (
+            "[订票入口](https://example.com) 在这里。",
+            "[订票入口](https://example.com) 在这里。",
+            0,
+        ),
+        ("会议安排在 [14:00]，别迟到。", "会议安排在 [14:00]，别迟到。", 0),
+        ("[重要] 请携带身份证。", "[重要] 请携带身份证。", 0),
+        ("系统提示：<b>加粗</b>不是标签泄漏。", "系统提示：<b>加粗</b>不是标签泄漏。", 0),
+        # ── 对抗验证实测的误删回归（F2/F3，2026-10-05）：初版形状表把这些
+        #    真内容整段删过；收紧后一个字符都不许动 ──
+        ("[Luggage cleared by customs at 14:30] 已入境。", "[Luggage cleared by customs at 14:30] 已入境。", 0),
+        (
+            "[Payment cleared by ICBC](https://bank.example.com) 已到账。",
+            "[Payment cleared by ICBC](https://bank.example.com) 已到账。",
+            0,
+        ),
+        ("[重要通知：行李已 cleared by 海关 放行] 谢谢。", "[重要通知：行李已 cleared by 海关 放行] 谢谢。", 0),
+        ("[Results: clear] 航班准点。", "[Results: clear] 航班准点。", 0),
+        ("[Context unclear] 请问从哪个城市出发？", "[Context unclear] 请问从哪个城市出发？", 0),
+        ("[Result: visa cleared] 可以出行。", "[Result: visa cleared] 可以出行。", 0),
+        ("[Media: photo compressed] 已压缩发送。", "[Media: photo compressed] 已压缩发送。", 0),
+        (
+            "[Results clearly show option B](https://example.com) 更省。",
+            "[Results clearly show option B](https://example.com) 更省。",
+            0,
+        ),
+        ("[Tool clearance required] 请补充授权。", "[Tool clearance required] 请补充授权。", 0),
+        # ⚠️ 已知表外变种（刻意不删）：① 的名词表只认 ``tool…`` 与
+        # ``inline media`` 全称，**不认裸 media**（与不认裸 results/outputs/
+        # contexts 同策：泛化英文名词误伤面太宽，F3 的 ``[Media: photo
+        # compressed]`` 是真内容的判定同理）。这条是**边界声明**：某天扩表
+        # 把裸 media 加回来，这里会红 —— 扩表的人必须同时改这条注释与
+        # residual 计数器的预期。可见性由 residual_internal_marker 兜底
+        # （见 test_shape_table_escapees_are_counted_not_silently_clean）。
+        ("[Media cleared: 3 images] 已发送。", "[Media cleared: 3 images] 已发送。", 0),
+        # ── 多条目/边界覆盖（2026-10-05 第二轮对抗验证 tests-metrics 发现
+        #    第 10 条：六个单行删除各自保持全绿 = 这些条目此前零覆盖）──
+        # ① 的清理动词表含 redact（完整屈折形式）；删掉该词条这里会红
+        ("[tool_result redacted]", "", 1),
+        # ① 的名词后缀链含 data|text|blocks?（tool result data 三连）；
+        # 删掉后缀链这里会红
+        ("[tool result data cleared]", "", 1),
+        # ① 的尾部内容上限 {0,80}：动词后 31 字符仍在界内；
+        # 上限被改小（≤31）这里会红
+        ("[tool_result pruned, annotation padding0123456789]", "", 1),
+        # ④ 的属性上限 {0,400}：350 字符属性仍在界内；
+        # 上限被改小（≤360）这里会红（③ 管成对、管不到未闭合开标签）
+        (
+            "好的。<system-reminder data-x='" + "A" * 350 + "'>",
+            "好的。",
+            1,
+        ),
+        # ── 接缝的非边界分支（tests-metrics 第 6 条：此前接缝用例全在
+        #    文首/文尾，中间接缝的两条分支零覆盖）──
+        # 独占一行的标记 = 两侧各一个换行 → 合并成一个（段落不合并、不加空行）；
+        # 跨行合成规则被改成 min(1) 这里会红
+        (
+            "1. 酒店 600 元/晚\n[tool_result pruned]\n2. 机票 1200 元",
+            "1. 酒店 600 元/晚\n2. 机票 1200 元",
+            1,
+        ),
+        # 两侧都是空行（l_nl=r_nl=2）→ 至多保留一个空行（段落分隔保住）；
+        # min(2,…) 被改成 min(1,…) 这里会红
+        ("上文\n\n[tool_result pruned]\n\n下文", "上文\n\n下文", 1),
+        # 下一行的缩进是内容（列表续行），不许吞
+        (
+            "1. 酒店 600 元\n[tool_result pruned]\n   备注：含早餐",
+            "1. 酒店 600 元\n   备注：含早餐",
+            1,
+        ),
+        # 上一行的行尾双空格 = markdown 硬换行，不许吞
+        ("行一  \n[tool_result pruned]\n行二", "行一  \n行二", 1),
+        # 同行接缝：两侧本来就没有空白 → 一个空格都不许插；
+        # 「同行恒加空格」的变异这里会红
+        ("前。[tool_result pruned]后。", "前。后。", 1),
+        # P2b（tests-metrics 之外的独立实测）：文首缩进在**远端**，
+        # 与标记无关；`_strip_internal_markers` 结尾的全局 strip() 这里会红
+        (
+            "    def f():\n        return 1\n\n[tool_result cleared by postprune]\n\n好的。",
+            "    def f():\n        return 1\n\n好的。",
+            1,
+        ),
+    ],
+)
+def test_internal_markers_are_removed_by_shape(
+    text: str,
+    expected: str,
+    expected_removed: int,
+) -> None:
+    """★★ harness 标记家族一律剥除；中文括号 / markdown 链接一刀不动。
+
+    ⚠️ 为什么必须列假阳性参数：这个函数删的是**用户可见的每一个字**，
+    而它的形状表**故意开得窄**（只认方括号标记与 system 标签）——「窄」
+    必须被测试钉住，否则下一次扩表时没人知道边界曾经在哪。
+    中文括号（``【】``）与 markdown 链接在差旅语境里太常见，误伤的代价
+    大于漏掉一个变种标记。
+
+    ⚠️ 变异（2026-10-05 对抗验证 F6 修正过一次**失实声明**；本组参数随后
+    经 12 处修复点逐点变异复验，全部哨兵命中）：把形状表放宽成「任何方括号」
+    → 后半段假阳性参数红；删掉 ② 正则 → ``[cache cleared by sanitizer]`` /
+    ``[history cleared by microcompaction]`` / ``[context cleared by
+    microcompaction]`` 三个参数红（此前文档把第三个当 ② 的哨兵，实测它在
+    旧表下由 ① 命中 —— 删 ② 后全绿，哨兵失效）；删掉 ① 的名词要求或 ② 的
+    机制名要求 → F2/F3 回归参数成片红；裸 ``media`` 加回名词表 →
+    ``[Media cleared: 3 images]`` 边界参数红。（F3 的 ``[Results: clear]``
+    靠的是**完整屈折动词表**：删掉它、只配对裸词干 ``clear`` 才会红。）
+    ⚠️ 2026-10-05 第二轮对抗验证（tests-metrics 第 10 条）又补了六组参数：
+    ① 的 redact 动词 / ``data|text|blocks?`` 后缀链 / 尾部 ``{0,80}`` 上限、
+    ④ 的属性 ``{0,400}`` 上限、中间接缝的两条非边界分支（跨行合成、
+    同行不加空格）、文首缩进的远端保全（P2b）—— 这些此前都是「删掉对应
+    单行、245 条仍全绿」的覆盖缺口。
+    """
+    cleaned, removed = _strip_internal_markers(text)
+
+    assert removed == expected_removed, (text, cleaned, removed)
+    assert cleaned == expected, (text, cleaned)
+
+
+def test_marker_stripping_is_idempotent_and_leaves_clean_text_alone() -> None:
+    """剥过的文本再剥一次一字不动；干净文本原样返回（返回同一对象）。
+
+    ⚠️ 幂等是**兜底二洗**可存在的前提（``_fallback_if_silent`` 会再洗
+    一遍）；「干净文本原样返回」是 ``clean`` 指标语义（一字未改）的
+    函数级保证。
+    """
+    cleaned, removed = _strip_internal_markers(f"{_MEASURED_MARKER}\n\n好的。")
+    assert (cleaned, removed) == ("好的。", 1)
+
+    again, removed_again = _strip_internal_markers(cleaned)
+    assert again == cleaned
+    assert removed_again == 0
+
+    text = "好的，杭州两天出差。\n\n你从哪个城市出发？"
+    untouched, removed_clean = _strip_internal_markers(text)
+    assert removed_clean == 0
+    assert untouched is text, "干净文本必须原样返回（函数契约：未命中时返回入参本身）"
+
+
+def test_the_measured_marker_is_blocked_end_to_end() -> None:
+    """★★ 缺陷 E 的**端到端**版本：线上那条回复的形状不许再上屏。
+
+    ⚠️ 三件事一起查，缺一不可：
+
+    1. 用户可见文本里**没有** ``postprune``（这是工单本身）；
+    2. 答复部分**完整保留**（不能把标记连同答案一起删）；
+    3. 事件是**重新合成**的 —— 原始事件里带着标记，复用它们等于没洗
+       （``_settle_round`` 末尾 ``cleaned == raw_text`` 判据的靶子；
+       ``block_id`` 必须换成 ``guard-`` 前缀的新块）。
+    """
+    answer = "好的，杭州两天出差。还差两个信息：\n\n**你从哪个城市出发？**"
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text(f"{_MEASURED_MARKER}\n\n{answer}"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent()
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    assert "postprune" not in _visible(out), f"内部标记漏给了用户：{_visible(out)!r}"
+    assert _visible(out) == answer, "标记连同真答案被一起删了（静默丢答案）"
+    assert any(isinstance(e, ReplyEndEvent) for e in out), (
+        "正文已经发出，结束事件却被吞了 —— 用户会听到两遍答复"
+    )
+    block_ids = {
+        e.block_id
+        for e in out
+        if isinstance(e, (TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent))
+    }
+    assert block_ids == {"guard-1-" + REPLY_ID}, (
+        "原始（带标记的）事件被复用了 —— 洗了但白洗"
+    )
+
+
+def test_marker_only_reply_is_swallowed_and_retried() -> None:
+    """★★ 整轮只剩一个内部标记 = 没有可用内容 → 吞掉重说（不给用户空白）。
+
+    ⚠️ 剥完为空之后必须走既有的 ``empty`` 拒绝路径（重试 → 兜底），而不是
+    「把空文本发出去」或「把标记发出去」。这条钉的就是接线顺序：清洗发生
+    在 :func:`_answer_problem` **之前**（``_settle_round`` 开头）。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text(f"{_MEASURED_MARKER}\n\n"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent()
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    assert not any(isinstance(e, ReplyEndEvent) for e in out), (
+        "空答复没有被吞掉 —— 框架不会重说，用户将面对空白"
+    )
+    assert "postprune" not in _visible(out)
+    assert agent.state.context_calls, "重说前必须往上下文里塞纠正指令"
+
+
+def test_fallback_never_resurrects_an_internal_marker() -> None:
+    """★★ 兜底路径对内部标记**再洗一遍**（防御性二洗）。
+
+    ⚠️ 今天 ``state.drafts`` 存进来的都是洗过的文本，所以这条二洗按构造
+    不可达 —— 但兜底是「重试用尽」的末端路径（比正文更晚、更少人盯），
+    一旦将来有别的路径把原文塞进 ``drafts``，这里是最后一道闸。脚本事件
+    流构造不出「drafts 里带标记」的形状，所以直接调方法钉住该路径。
+    """
+    state = _ReplyState()
+    state.reply_id = REPLY_ID
+    state.drafts = [f"{_MEASURED_MARKER}\n\n订单已确认，10 月 12 日出票。"]
+
+    out = ReplyGuardMiddleware(max_retries=0)._fallback_if_silent(_FakeAgent(), state)
+
+    assert _visible(out) == "订单已确认，10 月 12 日出票。"
+    assert "postprune" not in _visible(out)
+
+
+def test_marker_removal_is_observed_and_never_counted_as_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 「洗掉标记」必须进指标（``stripped_internal_marker``），且与 ``clean`` 互斥。
+
+    ⚠️ 为什么这个指标不能省：标记被删掉之后，正文和日志里都**留不下痕**
+    —— 「模型开始复读标记」这件事唯一的可见性就是这条曲线（以及一条
+    WARNING）。而 ``clean`` 的语义是「一个字符都没改」，洗过标记的轮次
+    绝不能记成它，否则缺陷 E 复发时监控上什么都看不到。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text(f"{_MEASURED_MARKER}\n\n好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert "stripped_internal_marker" in seen, seen
+    assert "clean" not in seen, seen
+    assert _visible(out) == "好的。"
+
+    # 干净轮次反向：记 ``clean``、绝不记标记指标（互斥的另一半）。
+    seen.clear()
+    clean_events = [
+        _reply_start(),
+        _call_start(),
+        *_text("住宿标准：单晚不超过 600 元。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), clean_events, _FakeAgent()))
+
+    assert "clean" in seen, seen
+    assert "stripped_internal_marker" not in seen, seen
+
+
+# ------------------------------------------------------------------------------
+# 对抗验证（2026-10-05，wf_f9b61a1c-1e2）确认缺陷的回归用例
+# ------------------------------------------------------------------------------
+def test_nested_marker_is_removed_to_a_fixed_point() -> None:
+    """★★ 嵌套标记**一次调用**就剥干净（对抗验证 F8）。
+
+    ⚠️ 初版按「找一个、删一个」单趟处理：``[tool_result pruned [tool_result
+    pruned]]`` 内层先被删、外层只剩一个空壳 ``[tool_result pruned ]`` ——
+    残渣照样上屏，要用户看到第二次调用才干净。现在删到不动点（每删一处
+    从头重搜最早匹配），这条钉住收敛性。
+    """
+    cleaned, removed = _strip_internal_markers(
+        "[tool_result pruned [tool_result pruned]]"
+    )
+    assert (cleaned, removed) == ("", 2)
+
+    # ⚠️ 三层嵌套（tests-metrics 第 10 条）钉的是**结果**：嵌套形状必须
+    # 一次调用剥干净。⚠️ 2026-10-05 变异 M1 复测：``while True`` 改成
+    # ``for _ in range(2)`` 时**这条不再变红**（批量删除的当前实现两趟就
+    # 能收掉三层）—— 趟数敏感度现在由 ``test_nested_marker_cascade_is_not
+    # _superlinear``（深度 2000 的级联）承担，M1 的哨兵已改指它。
+    three, removed_three = _strip_internal_markers(
+        "[tool_result pruned [tool_result pruned [tool_result pruned]]]"
+    )
+    assert (three, removed_three) == ("", 3)
+
+
+def test_seam_splicing_preserves_markdown_on_the_far_side() -> None:
+    """★★ 删标记是**接缝级**缝合，远端 markdown 一个字符不动（F1）。
+
+    ⚠️ 初版删完标记后对**全文**做 ``[ \\t]{2,}`` → 单空格、``\\n{3,}`` →
+    双换行的「整理」：代码围栏里的四空格缩进被吃成 ``x = 1``
+    （``ast.parse`` 直接 IndentationError）、嵌套列表三空格缩进塌成一格
+    （层级重排）、行尾双空格（markdown 硬换行）消失。这些都是**远端**的
+    合法内容，与标记无关 —— 只有标记两侧的接缝空白该被吃掉。
+    """
+    code = (
+        f"{_MEASURED_MARKER}\n\n"
+        "```python\ndef f():\n    x = 1\n    return x\n```\n"
+    )
+    cleaned, removed = _strip_internal_markers(code)
+    assert removed == 1
+    assert "    x = 1" in cleaned, f"代码围栏缩进被吃了：{cleaned!r}"
+
+    lst = "[tool_result pruned]\n\n- 一级\n  - 二级\n    - 三级\n"
+    cleaned_list, _ = _strip_internal_markers(lst)
+    assert "  - 二级" in cleaned_list and "    - 三级" in cleaned_list, (
+        f"嵌套列表缩进被压平：{cleaned_list!r}"
+    )
+
+    hard = f"{_MEASURED_MARKER}\n\n行一  \n行二\n"
+    cleaned_hard, _ = _strip_internal_markers(hard)
+    assert "行一  \n行二" in cleaned_hard, (
+        f"行尾双空格（markdown 硬换行）被吃掉：{cleaned_hard!r}"
+    )
+
+
+def test_system_tag_bounds_cannot_be_evaded_by_long_payloads() -> None:
+    """★★ ③ 的内容/属性上限被实测绕过过（F9），加宽后不许再漏。
+
+    ⚠️ 初版 ③ 的属性上限 120、内容上限 600：145 字符的 ``data-x`` 属性或
+    601 字的内容让 ③ 整条失配，只剩 ④ 删掉开标签、**内容留在正文里** ——
+    比不删更糟（``removed`` 计数还显示「拦下了 1 处」）。这里用 150/700
+    字符复现该形状，两个都必须整条消失。
+    """
+    long_attr = (
+        "<system-reminder data-x='" + "A" * 150 + "'>隐藏内容</system-reminder>"
+        "\n\n好的。"
+    )
+    cleaned, removed = _strip_internal_markers(long_attr)
+    assert (cleaned, removed) == ("好的。", 1)
+    assert "A" * 150 not in cleaned
+
+    long_body = f"<system-info>{'内' * 700}</system-info>\n\n好的。"
+    cleaned_body, removed_body = _strip_internal_markers(long_body)
+    assert (cleaned_body, removed_body) == ("好的。", 1), (
+        f"长内容标签被绕过、内容留在正文：{cleaned_body!r}"
+    )
+
+    # ⚠️ 内容里的 ``<``（如 HTML 片段）不许让 ③ 整条失配 —— 内容字符类
+    # 必须是 ``[\s\S]`` 而不是 ``[^<]``（F9 同一条修复的另一半，
+    # 2026-10-05 tests-metrics 第 10 条复查时发现此处零覆盖）。
+    with_html = "<system-info>内容 <b>加粗</b> 继续</system-info>\n\n好的。"
+    cleaned_html, removed_html = _strip_internal_markers(with_html)
+    assert (cleaned_html, removed_html) == ("好的。", 1), (
+        f"内容含 < 的成对标签被绕过：{cleaned_html!r}"
+    )
+
+
+def test_marker_in_the_thinking_chain_never_reaches_the_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 思考链是**用户可见且逐条落库**的上屏通道（对抗验证 F4 实测旁路）。
+
+    ⚠️ 初版只缓冲文本块，``ThinkingBlockDeltaEvent`` 走泛型 ``yield`` 原样
+    放行：同一条复读标记挪进思考链就绕过整道守卫（前端无条件渲染
+    ``block.thinking``，服务端对每个事件 ``append_event``），该轮还会被记成
+    ``clean``。修复后：思考块按块缓冲、块结束时结算，**只洗标记**（推理本身
+    一字不动 —— 「我先查一下」这类措辞在思考链里是正常推理，不是草稿），
+    命中时记 ``stripped_internal_marker``、事件重新合成。
+    ⚠️ 并且思考链洗过标记的回复**不再记 ``clean``**（2026-10-05 第二轮
+    对抗验证 tests-metrics 第 4 条：修前正文这一轮会照记 ``clean``，
+    同一条「标记被拦下」的事件在不同通道给出不同动作）。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    answer = "好的，杭州两天出差。还差两个信息：\n\n**你从哪个城市出发？**"
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id="t-1"),
+        ThinkingBlockDeltaEvent(
+            reply_id=REPLY_ID,
+            block_id="t-1",
+            delta=f"{_MEASURED_MARKER}\n用户要去杭州，先确认出发地。",
+        ),
+        ThinkingBlockEndEvent(reply_id=REPLY_ID, block_id="t-1"),
+        *_text(answer),
+        _call_end(),
+        _reply_end(),
+    ]
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    thinking = "".join(
+        e.delta for e in out if isinstance(e, ThinkingBlockDeltaEvent)
+    )
+    assert "postprune" not in thinking, f"标记从思考链漏给了用户：{thinking!r}"
+    assert "用户要去杭州，先确认出发地。" in thinking, "推理本身被连坐删了"
+    assert _visible(out) == answer, "正文被思考链的清洗波及"
+    assert "stripped_internal_marker" in seen, seen
+    # ⚠️ 正文这一轮确实一字未改，但**整条回复**改过（思考链）——
+    # ``clean`` 的语义是「一个字符都没改」，必须被抑制
+    # （tests-metrics 第 4 条：修前实测 seen=['stripped_internal_marker',
+    # 'clean']，与测试标题自称的互斥语义自相矛盾）。
+    assert "clean" not in seen, seen
+    block_ids = {
+        e.block_id
+        for e in out
+        if isinstance(
+            e,
+            (ThinkingBlockStartEvent, ThinkingBlockDeltaEvent, ThinkingBlockEndEvent),
+        )
+    }
+    assert block_ids == {"think-1-" + REPLY_ID}, (
+        "洗过的思考链复用了原始事件（洗了但白洗），或块 id 无 think- 前缀"
+    )
+
+
+def test_marker_hidden_in_text_block_end_payload_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ ``TEXT_BLOCK_END.text`` 会**覆盖**块内容（对抗验证 F5，潜在旁路）。
+
+    ⚠️ 本轮所有内容判据只看 DELTA 拼接，而 ``Msg.append_event`` 在
+    ``TEXT_BLOCK_END`` 上用 ``event.text`` 覆盖块内容：DELTA 干净、END 载荷
+    带标记时 ``cleaned == raw_text`` 成立、旧事件原样复用 —— 实时流看着干净，
+    **刷新后标记从历史消息里冒出来**。修复后 END 载荷带标记 = 不许复用，
+    走重新合成（合成的 END 用洗过的文本），并记 ``stripped_internal_marker``
+    （指标口径是「拦下了」，记成 clean 会让曲线骗人）。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    dirty_end = TextBlockEndEvent(
+        reply_id=REPLY_ID,
+        block_id="block-1",
+        text=f"好的。{_MEASURED_MARKER}",
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="block-1"),
+        TextBlockDeltaEvent(reply_id=REPLY_ID, block_id="block-1", delta="好的。"),
+        dirty_end,
+        _call_end(),
+        _reply_end(),
+    ]
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert "postprune" not in _visible(out)
+    ends = [e for e in out if isinstance(e, TextBlockEndEvent)]
+    assert ends and all("postprune" not in (e.text or "") for e in ends), (
+        f"END 载荷里的标记原样发出：{[e.text for e in ends]!r}"
+    )
+    assert "stripped_internal_marker" in seen, seen
+    assert {e.block_id for e in out if isinstance(e, TextBlockDeltaEvent)} == {
+        "guard-1-" + REPLY_ID
+    }, "END 载荷脏却没有重新合成 —— 复用等于没洗"
+
+
+def test_tool_payload_deltas_are_scrubbed_in_place() -> None:
+    """★★ 工具事件的文本载荷同样上屏且落库，标记就地洗掉。
+
+    ⚠️ 两条载荷路径：``TOOL_RESULT_TEXT_DELTA``（执行链上屏）与
+    ``TOOL_CALL_DELTA``（模型正在写的调用参数，前端会实时显示）。它们不走
+    缓冲，只能就地洗「上屏副本」—— 用 ``model_copy`` 换掉 ``delta``，不改
+    原始事件对象。工具返回的**其余内容**（如差标金额）必须原样保留：它是
+    接地账本的来源。
+    """
+    tool_answer = f"{_MEASURED_MARKER}\n北京住宿标准：单晚不超过 600 元。"
+    events = [
+        _reply_start(),
+        _call_start(),
+        _tool_call("search_flights"),
+        _tool_result(tool_answer),
+        ToolCallDeltaEvent(
+            reply_id=REPLY_ID,
+            tool_call_id="call-search_flights",
+            delta='{"marker": "[tool_result pruned]"}',
+        ),
+        *_text("我先查一下航班。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_flights": _FakeTool(is_read_only=True)})
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    tool_deltas = [
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    ]
+    assert tool_deltas, "工具返回事件没有透传（执行过程必须可见）"
+    assert all("postprune" not in d for d in tool_deltas), tool_deltas
+    assert any("600 元" in d for d in tool_deltas), "标记清洗把工具返回的差标金额也吃了"
+
+    call_deltas = [e.delta for e in out if isinstance(e, ToolCallDeltaEvent)]
+    assert call_deltas and all("pruned" not in d for d in call_deltas), call_deltas
+
+    assert not any(_has_internal_marker(e.delta) for e in out if hasattr(e, "delta"))
+
+
+def test_shape_table_escapees_are_counted_not_silently_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 形状表**外**的变种只计数不删，但绝不能无声无息（对抗验证 F7）。
+
+    ⚠️ 模块文档曾承诺这类变种会落进 ``draft_paragraph_left_*`` —— 实测
+    不成立：``[things were cleaned up thoroughly]`` 配工具名词缺失时，
+    ``_is_draft`` 与 ``_classify_suspicious_paragraphs`` 对它全为假，整轮
+    被记成 ``clean``，模型复读标记这件事完全不可见。现在 ``_report`` 扫
+    正文 + 思考链的残留候选，记 ``residual_internal_marker`` + WARNING。
+    文本本身**不动**（删它没有把握）—— 只保证「看不见」变成「看得见」。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    text = "[things were cleaned up thoroughly] 好的。"
+    assert _residual_marker_count(text) == 1, "残留计数器本身没认出这个词表外变种"
+
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text(text),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert _visible(out) == text, "残留候选被删了 —— 这层刻意只计数不删"
+    assert "residual_internal_marker" in seen, seen
+    assert "stripped_internal_marker" not in seen, (
+        "形状表外的变种被记成「已剥除」—— 指标口径错位"
+    )
+
+
+# ==============================================================================
+# 六、第二轮对抗验证（2026-10-05，wf_a41ee780-4fb）确认缺陷的回归用例
+# ==============================================================================
+#: 工具流事件用的调用 id（Start/Delta/End 必须一致才对得上缓冲键）。
+_STREAM_CALL_ID = "call-stream-1"
+
+
+def _tool_result_start(
+    call_id: str = _STREAM_CALL_ID,
+    name: str = "search_hotels",
+) -> ToolResultStartEvent:
+    """构造工具返回开始事件。"""
+    return ToolResultStartEvent(
+        reply_id=REPLY_ID,
+        tool_call_id=call_id,
+        tool_call_name=name,
+    )
+
+
+def _tool_result_delta(call_id: str, delta: str) -> ToolResultTextDeltaEvent:
+    """构造工具返回文本分片事件。"""
+    return ToolResultTextDeltaEvent(
+        reply_id=REPLY_ID,
+        tool_call_id=call_id,
+        delta=delta,
+    )
+
+
+def _tool_result_end(call_id: str) -> ToolResultEndEvent:
+    """构造工具返回结束事件。"""
+    return ToolResultEndEvent(
+        reply_id=REPLY_ID,
+        tool_call_id=call_id,
+        state=ToolResultState.SUCCESS,
+    )
+
+
+def _tool_call_delta(call_id: str, delta: str) -> ToolCallDeltaEvent:
+    """构造工具调用参数分片事件。"""
+    return ToolCallDeltaEvent(
+        reply_id=REPLY_ID,
+        tool_call_id=call_id,
+        delta=delta,
+    )
+
+
+def _tool_call_end(call_id: str) -> ToolCallEndEvent:
+    """构造工具调用结束事件。"""
+    return ToolCallEndEvent(reply_id=REPLY_ID, tool_call_id=call_id)
+
+
+def test_marker_stripping_is_not_superlinear_on_degenerate_input() -> None:
+    """★★ P1：清洗成本不许随命中数**超线性**增长（退化输入的时间哨兵）。
+
+    ⚠️ 修前实测（2026-10-05，本机）：每趟只删一处、删一处就全文重扫 ⇒
+
+        · ``"<system-reminder>"`` × 640（10.6 KB，全是开标签、没有闭标签，
+          ③ 号模式在每个起点都要把惰性 ``[\\s\\S]{0,4000}?`` 展开到上限）
+          —— **21.3 秒**；×1024（17 KB）**67 秒**。这不是慢，是把事件
+          循环整个堵死：守卫在 ``on_reply`` 里同步跑，期间整个 worker
+          一个事件都发不出去。
+        · ``"[tool_result pruned]"`` × 3200（62.5 KB）—— **6.9 秒**
+          （每次缝合要做两趟跨全文的接缝正则）。
+
+    修复后同一批输入分别 ~0.1s / ~0.15s / ~0.04s（本机实测）。
+    时间阈值取 5s / 3s：距新实现 30 倍以上余量（CI 机器慢十倍也不误报），
+    距旧实现 2–4 倍（真退化了就会红）。
+
+    ⚠️ 这是**时间**断言，天然比行为断言脆 —— 所以只在这条路径上放，
+    且阈值刻意开得很宽。它守的不是「有多快」，是「不许再退回
+    O(命中数 × 全文长度)」。
+    """
+    open_tags = "<system-reminder>" * 640
+    start = time.perf_counter()
+    cleaned, removed = _strip_internal_markers(open_tags)
+    elapsed = time.perf_counter() - start
+    assert (cleaned, removed) == ("", 640)
+    assert elapsed < 5.0, (
+        f"640 个开标签用了 {elapsed:.2f}s —— 清洗退化回超线性了"
+        "（旧实现 21s，批量不动点版 ~0.1s）"
+    )
+
+    many_markers = "[tool_result pruned]" * 3200
+    start = time.perf_counter()
+    cleaned_many, removed_many = _strip_internal_markers(many_markers)
+    elapsed_many = time.perf_counter() - start
+    assert (cleaned_many, removed_many) == ("", 3200)
+    assert elapsed_many < 3.0, (
+        f"3200 处标记用了 {elapsed_many:.2f}s —— 每趟仍在全量重扫"
+        "（旧实现 6.9s，批量不动点版 ~0.04s）"
+    )
+
+
+def test_two_system_tags_do_not_swallow_the_text_between_them() -> None:
+    """★★ ③ 的惰性量词被双标签用例钉住（tests-metrics 第 3 条）。
+
+    ⚠️ ``<system-*>…</system-*>`` 的内容段用的是**惰性** ``[\\s\\S]{0,4000}?``
+    —— 里侧那对标签之间的真答案靠它存活。单行变异（惰性 → 贪婪）此前
+    245 条全绿：贪婪会让第一个开标签一路吃到**最后一个闭标签**，
+    ``真实答案`` 被整段静默删除，而 ``removed`` 仍报 2。
+    """
+    text = (
+        "<system-reminder>a</system-reminder>\n\n真实答案\n\n"
+        "<system-reminder>b</system-reminder>"
+    )
+    cleaned, removed = _strip_internal_markers(text)
+    assert (cleaned, removed) == ("真实答案", 2), (
+        f"两个泄漏标签之间的真答案被连坐删了：{cleaned!r}（③ 变贪婪了？）"
+    )
+
+
+def test_standalone_marker_line_does_not_arm_the_tail_draft_strip() -> None:
+    """★★ P2 端到端：独占一行的标记不许造出段落边界，把真答案喂给尾部剥离。
+
+    ⚠️ 修前实测（workflow 原始复现）：回复 ``出行清单：\\n[tool_result
+    pruned]\\nI need to bring my passport.`` 被服务端发出**并落库**为只剩
+    ``出行清单：`` —— 接缝把标记那一行换成了空行 ⇒ ``_split_paragraphs``
+    切出 ``I need to bring my passport.`` 这个新段落 ⇒ 它命中尾部草稿的
+    强开头 ``^I (need|should|…)`` ⇒ ``_strip_drafts(at_tail=True)`` 静默
+    吃掉。**没有标记的同样文本一字不动** —— 标记的存在改变用户拿到的
+    内容是纯粹的净损失。修复后两者输出必须一致。
+    """
+    without_marker = "出行清单：\nI need to bring my passport."
+    with_marker = "出行清单：\n[tool_result pruned]\nI need to bring my passport."
+
+    out_clean = asyncio.run(
+        _run(
+            ReplyGuardMiddleware(),
+            [
+                _reply_start(),
+                _call_start(),
+                *_text(without_marker),
+                _call_end(),
+                _reply_end(),
+            ],
+            _FakeAgent(),
+        )
+    )
+    out_marked = asyncio.run(
+        _run(
+            ReplyGuardMiddleware(),
+            [
+                _reply_start(),
+                _call_start(),
+                *_text(with_marker),
+                _call_end(),
+                _reply_end(),
+            ],
+            _FakeAgent(),
+        )
+    )
+
+    assert _visible(out_clean) == without_marker
+    assert _visible(out_marked) == without_marker, (
+        f"带标记的回复被剃成了 {_visible(out_marked)!r} —— "
+        "接缝又造出段落边界、尾巴草稿剥离吃掉了真答案"
+    )
+    assert "pruned" not in _visible(out_marked)
+
+
+def test_punctuation_only_answer_is_rejected_not_shown() -> None:
+    """★★ P3：剥完只剩标点的轮次判 ``empty``，不许把「。」端给用户。
+
+    ⚠️ 修前实测：``[tool_result pruned]。`` 剥完剩一个句号，``_answer_problem``
+    只查 ``strip()`` 非空 ⇒ 放行 —— 用户收到一个孤零零的「。」。
+    判据改成「没有任何 ``\\w`` 字符（Unicode：CJK/字母/数字）即 empty」。
+    """
+    assert _answer_problem("。") == "empty"
+    assert _answer_problem("…。!?、") == "empty"
+    assert _answer_problem("好的。") is None, "正常中文答复被误判成 empty"
+
+    seen: list[str] = []
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text("[tool_result pruned]。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent()
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    assert _visible(out) == "", f"标点孤儿上屏了：{_visible(out)!r}"
+    assert not any(isinstance(e, ReplyEndEvent) for e in out), (
+        "标点轮没有被吞掉 —— 框架不会重说，用户将面对空白"
+    )
+    assert agent.state.context_calls, "重说前必须往上下文里塞纠正指令"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # 同一处方括号落进两条残留模式（清理动词 + ``by 机制名``）——
+        # 修前逐模式相加报 2 处（tests-metrics 第 8 条）
+        ("[old data compressed by context manager]", 1),
+        ("[caches cleared by microcompaction]", 1),
+        # 仅第二条模式命中（清理动词缺失）——第二模式被删时这里会红
+        # （tests-metrics 第 10 条：此前被删完全无声）
+        ("[caches evicted by microcompaction]", 1),
+        # ⚠️ **只**命中第二条模式的形状 —— 2026-10-05 变异 M33 实测：上面
+        # ``evicted`` 那条会被第一条模式的宽动词表（``evict(?:ed|ing|s)?``）
+        # 兜住，删掉第二条模式它照样是 1 处，对「第二模式被删」完全不敏感。
+        # 真正的隔离样本要同时满足两条：①「动词」不在残留动词表里
+        # （``hidden``），② ``by`` 后**紧挨着**机制名（第二条模式没有
+        # ``the`` 这类冠词的容身之处）。上面的 ``[cache was dropped by the
+        # evictor]`` 也不行：``dropp?`` 在动词表里、``evictor`` 不在机制名里。
+        ("[snippet hidden by microcompaction]", 1),
+        # 两处互不相邻的候选 = 2 处（合并逻辑不许把相邻判定放宽）
+        ("[a cleaned up] 和 [b was removed by the pruner]", 2),
+    ],
+)
+def test_residual_count_counts_candidates_not_pattern_hits(
+    text: str,
+    expected: int,
+) -> None:
+    """★★ 残留计数按**候选处**计，不按模式命中次数计（tests-metrics 第 8 条）。
+
+    ⚠️ WARNING 文案（以及这条指标）里的数字读作「仍有 N 处候选」；
+    同一处方括号同时命中两条宽模式时逐模式相加会把 1 处报成 2 处，
+    系统性放大 —— 修复是先把命中区间合并重叠再数不相交区间个数。
+    """
+    assert _residual_marker_count(text) == expected, text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # ``… by <机制名>`` 形状（残留第二模式）——只钉「括号类」这件事
+        "【tool_result cleared by postprune】好的。",
+        "（tool result cleared by postprune）好的。",
+        # ⚠️ 只命中**第一模式**的形状（清理动词、无 by）——不补这两条的话
+        # 第二模式会把前两条兜住：把第一模式的括号类改回 ``[［``/``]］``
+        # （去掉中文括号）时套件仍全绿，本测试对它不敏感（变异 M34 实测）。
+        "【things were cleaned up】好的。",
+        "（data was compressed）好的。",
+    ],
+)
+def test_cjk_bracket_variants_are_counted_not_silently_clean(
+    text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ P6：中文括号/全角圆括号刻意不剥，但**必须计数**（不许沉默放行）。
+
+    ⚠️ 修前实测：``【tool_result cleared by postprune】`` 既不剥、也不进
+    任何计数 —— 指标全为 ``clean``，模型复读标记这件事完全不可见。
+    形状表保持刻意窄（差旅正文里中文括号太常见），残留扫描的括号类
+    扩到 ``【】（）``：文本不动，但 ``residual_internal_marker`` 抬头。
+
+    ⚠️ ``clean`` 与 ``residual_internal_marker`` 在这条路径上**可以同时
+    出现**：前者说「守卫没改正文」，后者说「上屏文本里仍有候选」——
+    两个问题，两个指标，刻意不做互斥（互斥的是
+    ``clean`` 与 ``stripped_internal_marker``：都描述「改没改」）。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    assert _residual_marker_count(text) == 1, "残留计数器没认出中文括号变种"
+
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text(text),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert _visible(out) == text, "中文括号被剥了 —— 形状表刻意不含它们"
+    assert "residual_internal_marker" in seen, seen
+    assert "stripped_internal_marker" not in seen, seen
+
+
+def test_marker_split_across_tool_result_deltas_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ P5：标记被流式分片拦腰截断时，工具通道不许把两半拼给用户。
+
+    ⚠️ 修前实测（服务端 SSE + 落库都复现）：``'{"note": "[tool_result
+    clea'`` + ``'red by postprune]"}'`` 两片**各自**干净，逐片就地洗放行，
+    拼起来是完整标记 —— 用户屏幕上和刷新后的历史里都有它。
+    修复是「留尾缓冲」：保留最近 :data:`_TOOL_STREAM_HOLDBACK` 字符，
+    等配对 End 事件到达时整段结算。
+
+    ⚠️ 断言用**拼起来**的文本（单看某一分片干净不算数 —— 那正是旧实现
+    的放行依据），并且要求 JSON 结构完好（洗的是跨度，不是整条载荷）。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, '{"note": "[tool_result clea'),
+        _tool_result_delta(_STREAM_CALL_ID, 'red by postprune]"}'),
+        _tool_result_end(_STREAM_CALL_ID),
+        *_text("我先查一下。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)})
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    joined = "".join(
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    )
+    assert joined == '{"note": ""}', f"分片标记没洗干净：{joined!r}"
+    # ⚠️ 副断言原先查的是 ``"pruned"`` —— 它不是本用例标记的子串
+    # （标记是 ``cleared by postprune``），**按构造永远为真**，等于没断言
+    # （2026-10-05 第三轮对抗验证 D 类的处置）。查标记里真有的词。
+    assert "postprune" not in "".join(
+        getattr(e, "delta", "") for e in out
+    ), "标记从某条通道漏出去了"
+    assert "stripped_internal_marker" in seen, seen
+    # ⚠️ 原先这里断言 ``"clean" not in seen``，但这个形状**不可能**记 clean
+    # （本轮没有可上屏的正文 ⇒ 没有 clean 可记）—— 同样是空断言。
+    # clean 的抑制由 test_tool_payload_strip_suppresses_clean_in_production_order
+    # 与 test_marker_in_tool_payload_suppresses_the_clean_action 两条钉住。
+
+
+def test_marker_split_across_tool_call_deltas_is_cleaned() -> None:
+    """★★ P5 的另一条通道：``TOOL_CALL_DELTA``（调用参数）同样留尾清洗。
+
+    ⚠️ 这条通道前端会实时显示（模型正在写的参数），修前同样被分片绕过。
+    调用参数与返回文本各有一条独立缓冲（键是 ``(kind, call_id)``），
+    只修一条 = 另一条仍是旁路。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_call_delta(_STREAM_CALL_ID, '{"args": "[tool_result clea'),
+        _tool_call_delta(_STREAM_CALL_ID, 'red by postprune]"}'),
+        _tool_call_end(_STREAM_CALL_ID),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, "共 3 家酒店。"),
+        _tool_result_end(_STREAM_CALL_ID),
+        *_text("我先查一下。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)})
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    joined = "".join(e.delta for e in out if isinstance(e, ToolCallDeltaEvent))
+    assert joined == '{"args": ""}', f"调用参数里的分片标记没洗干净：{joined!r}"
+    assert "共 3 家酒店。" in "".join(
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    ), "另一条通道的返回文本被波及"
+
+
+def test_tool_call_id_reuse_does_not_leak_stale_arguments() -> None:
+    """★★ 同一 ``tool_call_id`` 被复用（模型重发同名调用）时清掉旧流缓冲。
+
+    ⚠️ 留尾缓冲引入了「跨事件的累积状态」：第一次调用没走完（End 缺失）
+    就重发同名调用时，不清缓冲的话新旧参数会拼成一段**谁都没生成过**的
+    文本发给前端（``'{"a": 1'`` + ``'{"b": 2}'``）。框架侧的
+    ``src/chains/events.py`` 对同一形状是同策（Start 时清分片），
+    守卫必须与它一致 —— 这条钉住 ``_feed_tool_stream`` 之前的 pop。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_call_delta(_STREAM_CALL_ID, '{"a": 1'),
+        # ⚠️ 不结尾就重发同一个 id —— 第二次 Start 必须清掉旧缓冲
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_call_delta(_STREAM_CALL_ID, '{"b": 2}'),
+        _tool_call_end(_STREAM_CALL_ID),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, "共 3 家酒店。"),
+        _tool_result_end(_STREAM_CALL_ID),
+        *_text("我先查一下。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)})
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    joined = "".join(e.delta for e in out if isinstance(e, ToolCallDeltaEvent))
+    assert joined == '{"b": 2}', (
+        f"复用 id 时新旧参数被拼在一起：{joined!r}"
+    )
+
+
+def test_tool_stream_is_flushed_when_the_end_event_never_arrives() -> None:
+    """★★ 工具流的安全网：配对 End 事件缺失时，缓冲不许无声蒸发。
+
+    ⚠️ 留尾缓冲的代价是文本被扣在内存里 —— 若工具抛异常/上游截断
+    （``ToolResultEndEvent`` 永远不来），没有安全网的话已扣的文本随回复
+    一起消失，用户看到的执行链凭空少一段。``ModelCallEndEvent`` 与
+    ``ReplyEndEvent`` 两处冲刷（:meth:`_flush_tool_streams`）。
+    这条用例走 ``ModelCallEnd``（正常链路在此已为空，此刻有内容正是
+    「End 缺失」的形状）。
+
+    ⚠️ 冲刷时必须**继续洗**（final 结算走同一清洗），不是原样倒出。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, '{"note": "[tool_result clea'),
+        _tool_result_delta(_STREAM_CALL_ID, 'red by postprune]"}'),
+        # ⚠️ 刻意不发 _tool_result_end
+        *_text("我先查一下。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)})
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    joined = "".join(
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    )
+    assert joined == '{"note": ""}', (
+        f"End 缺失时缓冲文本要么没冲刷、要么没洗：{joined!r}"
+    )
+
+
+def test_marker_in_tool_payload_suppresses_the_clean_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 工具通道洗过标记的轮次也不许记 ``clean``（互斥的第三块拼图）。
+
+    ⚠️ 场景取「同一轮里既写复述、又调写工具」（``submit_approval`` 非只读
+    ⇒ 文字按复述保留）：正文一字未改（本会走干净快路径记 ``clean``），
+    而工具返回里剥掉了分片标记 ⇒ 整条回复改过 ⇒ ``clean`` 必须被抑制
+    （``round_marker_stripped`` 标志，2026-10-05 第二轮对抗验证的修复）。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    text = "申请已提交：10 月 12 日出发，酒店 600 元/晚。"
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="submit_approval",
+        ),
+        _tool_result_start(name="submit_approval"),
+        _tool_result_delta(_STREAM_CALL_ID, "[tool_result clea"),
+        _tool_result_delta(_STREAM_CALL_ID, "red by postprune]"),
+        _tool_result_end(_STREAM_CALL_ID),
+        *_text(text),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(
+        tools={"submit_approval": _FakeTool(is_read_only=False)},
+    )
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    assert _visible(out) == text, "复述文字被误剥"
+    assert "stripped_internal_marker" in seen, seen
+    assert "clean" not in seen, seen
+    assert "kept_confirmation_round" in seen, seen
+
+
+def test_end_override_payload_residual_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ P8：``TEXT_BLOCK_END`` 的覆盖载荷是**刷新后**用户看到的文本。
+
+    ⚠️ 修前实测（对抗验证）：覆盖载荷体含形状表外的候选（如
+    ``[things were cleaned up thoroughly]``）时，DELTA 拼接干净 ⇒
+    走复用路径、指标全为 ``clean`` —— 而刷新后标记从历史消息里冒出来。
+    修复后覆盖载荷（``event.text != 原始拼接``）进 ``_report`` 的残留
+    扫描（第三条通道），记 ``residual_internal_marker``。
+
+    ⚠️ 这里刻意只计数不删：形状表外的候选删了没有把握（可能是真内容）。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    dirty_payload = "好的。[things were cleaned up thoroughly]"
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="block-1"),
+        TextBlockDeltaEvent(reply_id=REPLY_ID, block_id="block-1", delta="好的。"),
+        TextBlockEndEvent(reply_id=REPLY_ID, block_id="block-1", text=dirty_payload),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert _visible(out) == "好的。"
+    assert "residual_internal_marker" in seen, (
+        f"END 覆盖载荷里的候选没进残留计数：{seen}"
+    )
+
+
+def test_thinking_chain_residual_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ ``_report`` 的残留扫描覆盖**思考链**（tests-metrics 第 2 条）。
+
+    ⚠️ 模块文档与 metrics.py 都声称残留计数扫正文 + 思考链，但唯一残留
+    用例只喂正文块 —— 删掉 ``_report`` 里 ``state.emitted_thinking``
+    那一项（或 ``_settle_thinking`` 里的累积）全套仍绿，思考链里的
+    表外变种无声消失。思考链同样实时上屏且落库，不是计数盲区。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    thinking = "[things were cleaned up thoroughly] 先想想。"
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id="t-1"),
+        ThinkingBlockDeltaEvent(reply_id=REPLY_ID, block_id="t-1", delta=thinking),
+        ThinkingBlockEndEvent(reply_id=REPLY_ID, block_id="t-1"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    emitted = "".join(
+        e.delta for e in out if isinstance(e, ThinkingBlockDeltaEvent)
+    )
+    assert emitted == thinking, "思考链被改了 —— 残留层刻意只计数不删"
+    assert "residual_internal_marker" in seen, (
+        f"思考链里的表外候选没进残留计数：{seen}"
+    )
+
+
+def test_tool_payload_residual_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 工具载荷的表外候选也进残留计数（第四条通道）。
+
+    ⚠️ ``tool_residual`` 在流式清洗时**逐段**累积（只数已发出的部分，
+    尾巴留到下次）—— 工具载荷上屏/落库，不是盲区。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_result_start(),
+        _tool_result_delta(
+            _STREAM_CALL_ID,
+            "[things were cleaned up thoroughly]",
+        ),
+        _tool_result_end(_STREAM_CALL_ID),
+        *_text("我先查一下。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)})
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    emitted = "".join(
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    )
+    assert emitted == "[things were cleaned up thoroughly]", (
+        f"工具载荷被改了 —— 残留层只计数：{emitted!r}"
+    )
+    assert "residual_internal_marker" in seen, (
+        f"工具载荷里的表外候选没进残留计数：{seen}"
+    )
+
+
+def test_stripped_action_is_recorded_when_a_draft_paragraph_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ ``stripped`` 动作有测试钉住（tests-metrics 第 1 条）。
+
+    ⚠️ 删掉 ``_settle_round`` 里那一行 ``observe_reply_guard("stripped")``
+    此前 245 条全绿 —— 于是「剥掉了头部草稿段」这件事在指标里彻底消失，
+    只剩日志。这条曲线是「闸门到底拦了什么」的主要产出，不能无覆盖。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text("我先查一下差标。\n\n住宿标准：单晚不超过 600 元。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert _visible(out) == "住宿标准：单晚不超过 600 元。"
+    assert "stripped" in seen, seen
+    assert "clean" not in seen, (
+        "剥过草稿的轮次同时记 clean —— 两个动作都描述「改没改」，必须互斥"
+    )
+    assert "stripped_internal_marker" not in seen, (
+        "只剥了草稿、没洗标记 —— 记成标记清洗是指标口径错位"
+    )
+
+
+def test_end_payload_marker_is_reported_as_one_in_the_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ END 载荷分支的 ``marker_removed = 1`` 被日志断言钉住（tests-metrics 第 7 条）。
+
+    ⚠️ 该分支单独记 WARNING 与指标，但 ``marker_removed`` 只喂给随后的
+    INFO 汇总行；把它改成 0 此前全套仍绿 —— 于是同一件事在日志里自相
+    矛盾：WARNING 说「拦下一处标记」，INFO 说「剥掉 0 处内部标记」。
+    断言取 INFO 汇总行里的计数（「1 处内部标记」）。
+    """
+    caplog.set_level(logging.INFO, logger="src.orchestration.reply_guard")
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="block-1"),
+        TextBlockDeltaEvent(reply_id=REPLY_ID, block_id="block-1", delta="好的。"),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="block-1",
+            text=f"好的。{_MEASURED_MARKER}",
+        ),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    infos = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "src.orchestration.reply_guard"
+        and record.levelno == logging.INFO
+    ]
+    joined = "\n".join(infos)
+    assert "1 处内部标记" in joined, (
+        f"END 载荷里拦下的标记没被计入 INFO 汇总：{infos}"
+    )
+
+
+# ==============================================================================
+# 七、第三轮对抗验证（2026-10-05，wf_7e634f25-73e）确认缺陷的回归用例
+# ==============================================================================
+#: 守卫的 logger 名（`caplog` 按名字取记录）。
+_GUARD_LOGGER = "src.orchestration.reply_guard"
+
+
+def _guard_logs(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    """取守卫在本次用例里写下的指定级别日志消息。
+
+    Args:
+        caplog (`pytest.LogCaptureFixture`): pytest 的日志夹具。
+        level (`int`): 级别（``logging.WARNING`` / ``logging.INFO``）。
+
+    Returns:
+        `list[str]`: 消息文本（已格式化）。
+    """
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _GUARD_LOGGER and record.levelno == level
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # ── 带块级前缀的独占标记行：整行连前缀一起摘 ──
+        (
+            "- 酒店 600 元\n- [tool_result pruned]\n- 机票 1200 元",
+            "- 酒店 600 元\n- 机票 1200 元",
+        ),
+        ("1. 酒店\n2. [tool_result pruned]\n3. 机票", "1. 酒店\n3. 机票"),
+        ("1) 酒店\n2) [tool_result pruned]\n3) 机票", "1) 酒店\n3) 机票"),
+        ("> 提醒\n> [tool_result pruned]\n> 带身份证", "> 提醒\n> 带身份证"),
+        ("## [tool_result pruned]\n正文", "正文"),
+        ("### 标题\n## [tool_result pruned]\n正文", "### 标题\n正文"),
+        ("  - [tool_result pruned]\n继续", "继续"),
+        ("* [tool_result pruned]", ""),
+        # ── 控制例：前缀那一行还有别的内容时，只摘标记本身 ──
+        ("- [tool_result pruned] 备注", "- 备注"),
+        ("前言 [tool_result pruned] 后语", "前言 后语"),
+    ],
+)
+def test_markdown_block_prefix_line_is_removed_with_the_marker(
+    source: str,
+    expected: str,
+) -> None:
+    """★★ 标记独占一行、行首是 markdown 块级前缀时，整行（含前缀）都要摘掉。
+
+    ⚠️ 修前实测（2026-10-05 第三轮对抗验证 #1，端到端）：接缝规则只吃标记
+    两侧的**空白**，而 ``-`` / ``2.`` / ``>`` / ``##`` 都是非空白内容 ⇒
+    用户看到**空列表项**（``'-\\n'-``）、**空引用行**、**空 H2**：结构性损坏
+    而不是少一个空格。修复是 :func:`_MARKDOWN_LINE_PREFIX_RE` +
+    :func:`_MARKDOWN_LINE_TAIL_RE`：标记独占一行且行首是纯块级前缀时，
+    连前缀带换行整行摘除。
+
+    ⚠️ 控制例同样重要：``- [标记] 备注`` 那一行**不是**「只有标记」，
+    前缀必须留着（它是用户列表的编号），只摘标记跨度。
+    """
+    cleaned, removed = _strip_internal_markers(source)
+    assert (cleaned, removed) == (expected, 1), (
+        f"块级前缀那一行没被整行摘掉：{cleaned!r}（期望 {expected!r}）"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # #2：动词后**紧跟** CJK —— `\b` 词边界失效，整处漏网
+        ("[tool_result pruned已从上下文移除] 好的。", "好的。"),
+        ("[tool_result cleared已清理] 好的。", "好的。"),
+        # #29：下划线分隔的标记族（`_` 不是 `\b` 边界）
+        ("[tool_result_pruned] 好的。", "好的。"),
+        ("[tool_result_cleared_by_postprune] 好的。", "好的。"),
+    ],
+)
+def test_marker_with_cjk_or_underscore_boundary_is_stripped(
+    source: str,
+    expected: str,
+) -> None:
+    """★★ ``\\b`` 换成显式环视后，CJK 紧跟动词 / 下划线分隔也要认得（#2/#29）。
+
+    ⚠️ 修前实测：``\\b`` 在「英文词 + 汉字」「下划线」两侧都不成立
+    （两者都是 ``\\w``），``'[tool_result pruned已从上下文移除]'``
+    与 ``'[tool_result_pruned]'`` **既不剥离也不计数** —— 用户看到标记、
+    监控全 clean。修复改用 :data:`_VERB_LEFT_GUARD` / :data:`_VERB_RIGHT_GUARD`
+    显式环视（两侧不是 ``[A-Za-z0-9]`` 即边界）。
+
+    ⚠️ 环视的代价必须由控制例把住：``[Results: unpruned]`` 里的
+    ``unpruned`` 是更长英文词的一部分，不许被当动词命中。
+    """
+    cleaned, removed = _strip_internal_markers(source)
+    assert (cleaned, removed) == (expected, 1), (
+        f"词边界放宽后这处标记仍漏网：{cleaned!r}（期望 {expected!r}）"
+    )
+
+
+def test_longer_english_word_containing_a_verb_is_not_a_marker() -> None:
+    """★★ 控制例：``unpruned`` 不是 ``pruned`` —— 显式环视不许误伤更长的词。
+
+    ⚠️ 这是 #2/#29 修复（``\\b`` → 显式环视）的**反向**钉子：环视一旦
+    写成「前缀匹配」，正常英文词就会被整段删掉。``[Results: unpruned]``
+    是真实语料里的正常内容。
+    """
+    text = "[Results: unpruned] 好的。"
+    cleaned, removed = _strip_internal_markers(text)
+    assert (cleaned, removed) == (text, 0), f"更长的英文词被误当标记：{cleaned!r}"
+    assert _residual_marker_count(text) == 0, "正常英文词被误计为残留候选"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # #4：CRLF 接缝 —— 标记两侧的 `\r\n` 要当成一条分隔吃掉
+        ("好的。\r\n[tool_result pruned]\r\n下一段。", "好的。\r\n下一段。"),
+        ("[tool_result pruned]\r\n好的。", "好的。"),
+        ("好的。\r\n[tool_result pruned]", "好的。"),
+    ],
+)
+def test_crlf_seam_leaves_no_blank_line_or_stray_cr(
+    source: str,
+    expected: str,
+) -> None:
+    """★★ ``_SEAM_WS`` 必须含 ``\\r``：CRLF 文本剥标记不许多空行 / 留孤立 ``\\r``。
+
+    ⚠️ 修前实测（#4）：``'好的。\\r\\n[标记]\\r\\n下一段。'`` 剥完是
+    ``'好的。\\r\\n\\r\\n下一段。'``（多一个空行）、``'[标记]\\r\\n好的。'``
+    剩 ``'\\r\\n好的。'``（前导 CRLF 当内容留着）、行尾那处留下孤立 ``\\r``。
+    Windows 客户端 / 复制粘贴的真实文本就是 CRLF，而这些都是**用户可见**
+    的排版损坏。
+    """
+    cleaned, removed = _strip_internal_markers(source)
+    assert (cleaned, removed) == (expected, 1), (
+        f"CRLF 接缝没洗干净：{cleaned!r}（期望 {expected!r}）"
+    )
+
+
+def test_blank_lines_that_are_not_a_seam_are_left_alone() -> None:
+    """★★ 控制例：没有标记时，CRLF 空行原样保留（`\\r` 进接缝空白不许改坏原文）。"""
+    text = "好的。\r\n\r\n下一段。"
+    cleaned, removed = _strip_internal_markers(text)
+    assert (cleaned, removed) == (text, 0), f"干净文本被动了：{cleaned!r}"
+
+
+def test_cleaned_up_tail_boundary_is_pinned() -> None:
+    """★★ ① 号模式的**尾上限 80** 是行为边界，得有输入能红（#24）。
+
+    ⚠️ 变异实测：把 ``[^\\[\\]［］\\n]{0,80}?`` 的上限降到 31/30，277 条
+    全绿（注释声称会红）—— 上限被踩到 29 才有参数化输入变红。原因是
+    套件里没有**贴着边界**的输入。这条用例把「≤80 剥、>80 不剥」钉死，
+    上限往下挪一格就会红。
+
+    ⚠️ 上限不是随便定的：放宽 = 更容易把真内容连坐删掉，收紧 = 真实
+    标记（``[tool_result pruned 已清理 12 条记录，剩余 3 条]`` 这类带
+    尾注的）漏网。边界值必须显式测。
+    """
+    at_limit = "[tool_result pruned " + "x" * 79 + "]"  # 动词后 80 字
+    over_limit = "[tool_result pruned " + "x" * 80 + "]"  # 动词后 81 字
+
+    cleaned, removed = _strip_internal_markers(at_limit)
+    assert (cleaned, removed) == ("", 1), (
+        f"尾长正好 80 的标记没被剥掉（上限被收紧了？）：{cleaned!r}"
+    )
+
+    cleaned_over, removed_over = _strip_internal_markers(over_limit)
+    assert (cleaned_over, removed_over) == (over_limit, 0), (
+        f"尾长 81 的文本被剥了（上限被放宽了？）：{cleaned_over!r}"
+    )
+
+
+def test_system_tag_attribute_boundary_is_pinned() -> None:
+    """★★ ④ 号模式的**属性上限 400** 同样是行为边界（#24 的另一半）。
+
+    ⚠️ 变异实测：属性量词 ``[^<>]{0,400}`` 降到 360，277 条全绿；降到 359
+    才有参数化输入变红。这条用例把边界钉在 400/401 上。
+    """
+    at_limit = "<system-reminder " + "a" * 399 + ">"
+    over_limit = "<system-reminder " + "a" * 400 + ">"
+
+    cleaned, removed = _strip_internal_markers(at_limit)
+    assert (cleaned, removed) == ("", 1), (
+        f"属性长 400 的孤立标签没被剥掉（上限被收紧了？）：{cleaned!r}"
+    )
+
+    cleaned_over, removed_over = _strip_internal_markers(over_limit)
+    assert (cleaned_over, removed_over) == (over_limit, 0), (
+        f"属性长 401 的文本被剥了（上限被放宽了？）：{cleaned_over!r}"
+    )
+
+
+def test_adjacent_residual_candidates_count_as_two() -> None:
+    """★★ 相邻候选是**两处**，不是一处（#22 的变异敏感性钉子）。
+
+    ⚠️ 变异实测：把 :func:`_residual_marker_count` 的区间合并条件从
+    ``start >= covered_until`` 放宽成 ``start > covered_until``（相邻区间
+    并成一处），原有四条参数化输入输出全不变、测试照样通过 —— 它们的
+    候选之间留了 3 个字符的间隔。这条用**真正贴边**的输入把语义钉死。
+    """
+    assert _residual_marker_count("[a cleaned up][b compressed]") == 2, (
+        "贴边的两处候选被合并成了一处（合并条件放宽了？）"
+    )
+    assert _residual_marker_count("[a cleaned up] [b compressed]") == 2, (
+        "有间隔的两处候选也被合并了"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # #19：裸清理动词（表外动词，形状表不剥 —— 但要计数）
+        "好的。 [tool_result cleaned] 行。",
+        "好的。 [tool_result purge] 行。",
+        "好的。 [tool_result flushed] 行。",
+        # #20：ASCII 圆括号
+        "(tool_result cleared by postprune) 好的。",
+    ],
+)
+def test_table_outsider_markers_are_counted_not_silently_clean(text: str) -> None:
+    """★★ 形状表**外**的变种：剥不了不要紧，**不许指标全 clean**（#19/#20）。
+
+    ⚠️ 修前实测：裸 ``clean/purge/flush/trim`` 与 ASCII 圆括号既不在剥除
+    形状表、也不在残留计数表里 ⇒ ``removed == 0`` 且 ``residual == 0``，
+    用户看到标记、监控什么也看不到。残留计数表已补上这两类（只计数
+    不删：它们也可能是真内容，删了没有把握）。
+    """
+    cleaned, removed = _strip_internal_markers(text)
+    assert removed == 0, f"表外变种被剥了（形状表放宽了？）：{cleaned!r}"
+    assert _residual_marker_count(text) >= 1, (
+        "表外变种既不剥也不计数 —— 指标会全 clean，这类泄漏完全不可见"
+    )
+
+
+# ------------------------------------------------------------------------------
+# 思考链通道（#5/#7/#8/#9/#10）
+# ------------------------------------------------------------------------------
+def test_thinking_block_missing_end_is_completed_not_dropped() -> None:
+    """★★ 干净思考块缺 ``END`` 也要补全 —— 否则落库块永远悬着（#5/#7）。
+
+    ⚠️ 修前实测：剥过标记的路径一直合成完整三件套，干净路径却**原样
+    透传**；上游少发 ``THINKING_BLOCK_END`` 时（handler 中途出错 /
+    协议破坏），落库侧 ``finished_at`` 永远为空、块的收尾逻辑永远不跑
+    —— 同一个缺陷只修了一半。修复是 :func:`_complete_thinking_blocks`。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id="t-1"),
+        ThinkingBlockDeltaEvent(reply_id=REPLY_ID, block_id="t-1", delta="没结尾。"),
+        # ⚠️ 刻意不发 ThinkingBlockEndEvent
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    kinds = [type(e).__name__ for e in out]
+    assert "ThinkingBlockEndEvent" in kinds, (
+        f"缺 END 的干净思考块被原样透传（落库永远悬着）：{kinds}"
+    )
+    thinking = "".join(
+        e.delta for e in out if isinstance(e, ThinkingBlockDeltaEvent)
+    )
+    assert thinking == "没结尾。", f"补全把内容改了：{thinking!r}"
+    block_ids = {
+        e.block_id for e in out if isinstance(e, ThinkingBlockEndEvent)
+    }
+    assert block_ids == {"t-1"}, f"补全换了块 id：{block_ids}"
+
+
+def test_thinking_block_missing_start_is_completed_with_original_id() -> None:
+    """★★ 干净思考块缺 ``START`` 要补上，且**保留原 id**（#5/#9）。
+
+    ⚠️ 修前实测：缺 ``START`` 时落库侧整块**蒸发**（``Msg.append_event``
+    靠 START 创建块，DELTA/END 找不到块就静默丢弃，服务端还打
+    ``ThinkingBlock 't1' not found, skipping.``）—— 实时流有、历史里没有。
+    补全必须用原 id：换 id 会让前端已经渲染的块对不上（#9）。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockDeltaEvent(reply_id=REPLY_ID, block_id="t-1", delta="没有 START。"),
+        ThinkingBlockEndEvent(reply_id=REPLY_ID, block_id="t-1", thinking="没有 START。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    kinds = [type(e).__name__ for e in out]
+    assert kinds.count("ThinkingBlockStartEvent") == 1, (
+        f"缺 START 的思考块没被补全（落库会整块蒸发）：{kinds}"
+    )
+    thinking = "".join(
+        e.delta for e in out if isinstance(e, ThinkingBlockDeltaEvent)
+    )
+    assert thinking == "没有 START。", f"补全把内容改了：{thinking!r}"
+    start = next(e for e in out if isinstance(e, ThinkingBlockStartEvent))
+    assert start.block_id == "t-1", f"补全换了块 id：{start.block_id!r}"
+
+
+def test_thinking_block_settles_at_its_own_end_before_text_events() -> None:
+    """★★ 思考块在**自己的 END** 处结算，事件顺序不倒退（#8）。
+
+    ⚠️ 变异实测：把块级结算改成「只在 ``ModelCallEnd`` 结算」，277 条
+    全绿 —— 而事件顺序会退化成「工具调用/文本事件之后才出现思考链」，
+    前端看到的是「先出答案、后出推理」。这条钉住顺序。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id="t-1"),
+        ThinkingBlockDeltaEvent(reply_id=REPLY_ID, block_id="t-1", delta="想。"),
+        ThinkingBlockEndEvent(reply_id=REPLY_ID, block_id="t-1", thinking="想。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    kinds = [type(e).__name__ for e in out]
+    assert kinds.index("ThinkingBlockEndEvent") < kinds.index(
+        "TextBlockStartEvent",
+    ), f"思考块被压到文本事件之后了：{kinds}"
+
+
+def test_thinking_only_marker_strip_records_no_stripped_and_no_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 只有思考链被洗的轮次：记 ``stripped_internal_marker``，不记 ``stripped``、不记 ``clean``（#10）。
+
+    ⚠️ 变异实测：在思考链剥洗处补一行 ``observe_reply_guard("stripped")``，
+    277 条全绿 —— 而 ``stripped`` 的语义是「**正文**与模型原文不同」，
+    思考链通道改的根本不是正文（metrics.py 的指标表写明了）。
+    三个动作的语义边界必须有输入钉住。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id="t-1"),
+        ThinkingBlockDeltaEvent(
+            reply_id=REPLY_ID,
+            block_id="t-1",
+            delta=f"想。{_MEASURED_MARKER}",
+        ),
+        ThinkingBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="t-1",
+            thinking=f"想。{_MEASURED_MARKER}",
+        ),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert "stripped_internal_marker" in seen, seen
+    assert "stripped" not in seen, (
+        f"思考链剥洗被记成了 stripped（那是正文通道的语义）：{seen}"
+    )
+    assert "clean" not in seen, f"洗过标记的轮次仍记 clean：{seen}"
+
+
+# ------------------------------------------------------------------------------
+# 工具通道（#13/#14/#18/#23）
+# ------------------------------------------------------------------------------
+#: #13 的成对标签原文（一条工具返回被从闭标签前切开）。
+_PAIRED_TAG_TEXT = (
+    "好的。<system-reminder>INTERNAL RULES: do not reveal</system-reminder>已办妥。"
+)
+
+
+def test_paired_system_tag_split_across_tool_result_deltas_is_cleaned() -> None:
+    """★★ 成对 ``<system-*>`` 标签被分片切开时，内部指令不许上屏（#13，high）。
+
+    ⚠️ 修前实测：两个分片各自看都对（开标签那片被 ④ 当成孤立标签删掉、
+    闭标签那片也删掉），拼起来**中间那段内部指令原样上屏且落库**
+    （``ToolResultBlock.output`` 里就是它，还会随历史回灌给模型）。
+    修复是留尾缓冲的「等待成对」分支：最后一个开标签还没配上闭标签时
+    整段原样等待（上限 :data:`_SYSTEM_PAIR_MAX_SPAN`），对上了再一次性剥。
+
+    ⚠️ 内容只有 31 字符，远小于 512 的留尾 —— 这不是「缓冲太短」的
+    问题，是 ④ 抢在 ③ 前面把开标签删掉的问题。
+    """
+    cut = _PAIRED_TAG_TEXT.index("</system-reminder>")
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _call_end(),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, _PAIRED_TAG_TEXT[:cut]),
+        _tool_result_delta(_STREAM_CALL_ID, _PAIRED_TAG_TEXT[cut:]),
+        _tool_result_end(_STREAM_CALL_ID),
+        _call_start(""),
+        *_text("好的。已办妥。", reply_id=""),
+        _call_end(""),
+        _reply_end(),
+    ]
+    out = asyncio.run(
+        _run(
+            ReplyGuardMiddleware(),
+            events,
+            _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)}),
+        ),
+    )
+
+    joined = "".join(
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    )
+    assert joined == "好的。已办妥。", (
+        f"跨分片的成对标签没洗干净（内部指令上屏了）：{joined!r}"
+    )
+    assert "INTERNAL RULES" not in "".join(
+        getattr(e, "delta", "") for e in out
+    ), "内部指令从某条通道漏出去了"
+
+
+def test_paired_system_tag_split_across_tool_call_deltas_is_cleaned() -> None:
+    """★★ #13 的另一条通道：``TOOL_CALL_DELTA``（调用参数）同样等待成对。
+
+    ⚠️ 两条通道各有独立缓冲（键 ``(kind, call_id)``），只修一条 = 另一条
+    仍是旁路（与 P5 的拆分标记同一形状）。
+    """
+    cut = _PAIRED_TAG_TEXT.index("</system-reminder>")
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_call_delta(_STREAM_CALL_ID, _PAIRED_TAG_TEXT[:cut]),
+        _tool_call_delta(_STREAM_CALL_ID, _PAIRED_TAG_TEXT[cut:]),
+        _tool_call_end(_STREAM_CALL_ID),
+        _call_end(),
+        _call_start(""),
+        *_text("好的。已办妥。", reply_id=""),
+        _call_end(""),
+        _reply_end(),
+    ]
+    out = asyncio.run(
+        _run(
+            ReplyGuardMiddleware(),
+            events,
+            _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)}),
+        ),
+    )
+
+    joined = "".join(e.delta for e in out if isinstance(e, ToolCallDeltaEvent))
+    assert joined == "好的。已办妥。", (
+        f"调用参数里跨分片的成对标签没洗干净：{joined!r}"
+    )
+
+
+def test_residual_candidate_riding_the_holdback_cut_is_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 骑在 512 字留尾切口上的残留候选必须计到数（#14/#18）。
+
+    ⚠️ 修前实测：候选的**起点**落在发出的那段、结尾还在留尾缓冲里时，
+    旧实现只扫 ``emit``（看不到结尾）、下一次只扫留尾（看不到开头）——
+    两边都不成形状 ⇒ ``tool_residual == 0``、零告警，而标记照常上屏。
+    修复按**起点归属**计数：扫描窗口取整段缓冲，起点已发出的当场记账。
+
+    ⚠️ 断言取 WARNING 里的「工具载荷 N 处」：这是**只计一次**的证明 ——
+    若下一次结算又数一遍，就会变成 2 处。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _call_end(),
+        _tool_result_start(),
+        _tool_result_delta(
+            _STREAM_CALL_ID,
+            "Z" * 170 + "[things were cleaned up thoroughly]" + "Y" * 494,
+        ),
+        _tool_result_end(_STREAM_CALL_ID),
+        _call_start(""),
+        *_text("好的。", reply_id=""),
+        _call_end(""),
+        _reply_end(),
+    ]
+    asyncio.run(
+        _run(
+            ReplyGuardMiddleware(),
+            events,
+            _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)}),
+        ),
+    )
+
+    warnings = _guard_logs(caplog, logging.WARNING)
+    joined = "\n".join(warnings)
+    assert "工具载荷 1 处" in joined, (
+        f"骑在留尾切口上的候选没被计数（或计重了）：{warnings}"
+    )
+
+
+def test_oversized_system_pair_in_tool_payload_is_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 超长成对 system 标签：标签剥掉、内容留下 —— 至少要**计数**（#23，工具通道）。
+
+    ⚠️ 修前实测：内容 4200 字（超 ③ 的 4000 上限）时 ③ 不命中、④ 只删两个
+    标签，4200 字内部注入内容原样上屏；而那段内容没有标签形状，残留扫描
+    （扫的是发出文本）永远认不出来 ⇒ ``tool_residual == 0``、零告警。
+    修复在**清洗前**的缓冲上按起点归属计数（
+    :func:`_oversize_system_pair_count_in_prefix`）。
+
+    ⚠️ 与「等待超时」那条分支的区别：这里的标签是**完整到达**的
+    （一条 delta 就收全），根本走不到等待分支 —— 旧实现连那次记账都没有。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    oversized = "<system-reminder>" + "内部注入内容。" * 700 + "</system-reminder>"
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _call_end(),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, oversized),
+        _tool_result_end(_STREAM_CALL_ID),
+        _call_start(""),
+        *_text("好的。", reply_id=""),
+        _call_end(""),
+        _reply_end(),
+    ]
+    asyncio.run(
+        _run(
+            ReplyGuardMiddleware(),
+            events,
+            _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)}),
+        ),
+    )
+
+    warnings = _log_all(caplog)
+    assert "工具载荷 1 处" in warnings, (
+        f"超长成对标签的内容上屏了却没计数（监控全绿）：{warnings}"
+    )
+
+
+def test_oversized_system_pair_in_thinking_is_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 超长成对 system 标签在**思考链**里同样要计数（#23 的同形状）。
+
+    ⚠️ 思考链同样实时上屏、同样落库 —— 剥不干净时内容跟着思考链出去。
+    正文轮有 :func:`_oversize_system_pair_count` 兜底，思考链此前没有。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    oversized = "<system-reminder>" + "内部注入内容。" * 700 + "</system-reminder>"
+    events = [
+        _reply_start(),
+        _call_start(),
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id="t-1"),
+        ThinkingBlockDeltaEvent(reply_id=REPLY_ID, block_id="t-1", delta=oversized),
+        ThinkingBlockEndEvent(reply_id=REPLY_ID, block_id="t-1", thinking=oversized),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    warnings = _log_all(caplog)
+    assert "剥离前预记 1 处" in warnings, (
+        f"思考链里的超长成对标签内容上屏了却没计数：{warnings}"
+    )
+
+
+def _log_all(caplog: pytest.LogCaptureFixture) -> str:
+    """把守卫本次写下的所有日志拼成一段文本（断言用）。"""
+    return "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _GUARD_LOGGER
+    )
+
+
+def test_tool_stream_is_flushed_when_the_model_call_end_never_arrives() -> None:
+    """★★ 工具流的安全网在 ``ReplyEnd`` 那处也要有（D1：两处调用点各钉一次）。
+
+    ⚠️ 变异实测：单独删掉 ``ModelCallEndEvent`` 或 ``ReplyEndEvent`` 处的
+    ``_flush_tool_streams`` 调用，277 条全绿 —— 既有的那条用例走的是
+    ``ModelCallEnd``，钉不到 ``ReplyEnd``。而 ``ReplyEnd`` 那处正是
+    「模型侧直接抛异常/被取消、连 ModelCallEnd 都没有」时的唯一机会。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="search_hotels",
+        ),
+        _tool_result_start(),
+        _tool_result_delta(_STREAM_CALL_ID, "共 3 家酒店。"),
+        # ⚠️ 刻意不发 ToolResultEndEvent，也**不发 ModelCallEndEvent**
+        _reply_end(),
+    ]
+    agent = _FakeAgent(tools={"search_hotels": _FakeTool(is_read_only=True)})
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    joined = "".join(
+        e.delta for e in out if isinstance(e, ToolResultTextDeltaEvent)
+    )
+    assert joined == "共 3 家酒店。", (
+        f"ReplyEnd 处的冲刷没生效，缓冲文本随回复一起蒸发了：{joined!r}"
+    )
+
+
+def test_tool_payload_strip_suppresses_clean_in_production_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 生产事件顺序下，工具载荷剥过标记的轮次不许记 ``clean``（#15）。
+
+    ⚠️ 修前实测：既有用例脚本的是「工具结果在 ``ModelCallEnd`` **之前**」
+    的**不可达**顺序（框架不可能那样发），所以「剥了标记的轮次仍记 clean」
+    在真实顺序下从来没被拦住 —— 实测生产顺序拿到
+    ``['kept_confirmation_round', 'clean', 'stripped_internal_marker', ...]``，
+    同一个回复既「一字未改」又「剥掉了标记」，指标自相矛盾。
+    修复是 ``pending_clean``：``clean`` 的记账推迟到下一个轮次边界，
+    那时工具载荷剥没剥过标记已经知道了。
+
+    ⚠️ 这条用例**刻意让回复在工具结果之后直接结束**（没有第二轮模型调用）：
+    被剥的那一轮就是最后一轮，``clean`` 若出现必然是它自己的。后续轮次
+    真的干净时记 ``clean`` 是正确行为，由
+    :func:`test_clean_is_recorded_for_a_later_clean_round_after_a_stripped_one`
+    单独钉住 —— 两条合起来才完整，只写一条会把「按轮复位」误判成 bug。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    text = "申请已提交，10 月 12 日出发。"
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id=_STREAM_CALL_ID,
+            tool_call_name="submit_approval",
+        ),
+        *_text(text),
+        # ⚠️ 生产顺序：ModelCallEnd **先到**，工具结果事件在它之后
+        _call_end(),
+        _tool_result_start(name="submit_approval"),
+        _tool_result_delta(_STREAM_CALL_ID, "[tool_result clea"),
+        _tool_result_delta(_STREAM_CALL_ID, "red by postprune]"),
+        _tool_result_end(_STREAM_CALL_ID),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(
+        tools={"submit_approval": _FakeTool(is_read_only=False)},
+    )
+
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    assert _visible(out) == text, "复述文字被误剥"
+    assert "stripped_internal_marker" in seen, seen
+    assert "clean" not in seen, (
+        f"生产顺序下工具通道剥了标记、这一轮仍被记成 clean：{seen}"
+    )
+
+
+def test_clean_is_recorded_for_a_later_clean_round_after_a_stripped_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ ``round_marker_stripped`` 是**按轮**复位的：后续干净轮该记 ``clean``（#25）。
+
+    ⚠️ 变异实测：删掉 ``begin_round`` 里的 ``self.round_marker_stripped = False``
+    那一行，277 条全绿 —— 而行为会变成「第一轮剥过标记，整条回复此后再也
+    不记 clean」（跨轮误抑制，指标偏低、告警偏高）。
+    反过来，上面 #15 那条要求同一轮里不许记 clean —— 两条一起才把
+    「按轮」这个粒度钉死。
+
+    ⚠️ 断言用**完整动作序列**（含顺序）：只断言集合的话，把 ``clean``
+    记在剥洗**之前**也照样绿，而那意味着「先记干净、后剥标记」——
+    同一个回复的两个动作互相打架。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_text(f"好的。{_MEASURED_MARKER}"),
+        _call_end(),
+        _call_start(""),
+        *_text("下一段。", reply_id=""),
+        _call_end(""),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert seen == ["stripped_internal_marker", "stripped", "clean"], (
+        f"跨轮复位的动作序列不对（误抑制或多记）：{seen}"
+    )
+
+
+def test_multi_block_end_payloads_are_not_treated_as_overrides(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 多文本块轮次：每块的 END 载荷与本块 DELTA 比，不许整轮重复计数（#16/#27）。
+
+    ⚠️ 修前实测：拿**整轮** DELTA 拼接当基准 ⇒ 每块的载荷都不等于整轮
+    文本（真载荷也全被当成「覆盖」），残留候选被重复计数：用户可见 1 处、
+    WARNING 报 2 处且「END 覆盖载荷 45 字」虚高。修法是把载荷按 **block_id
+    逐块**与**本块**的 DELTA 拼接比 —— 比对基准必须是它自己的块。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-1"),
+        TextBlockDeltaEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            delta="[things were cleaned up thoroughly] 好的。",
+        ),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            text="[things were cleaned up thoroughly] 好的。",
+        ),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-2"),
+        TextBlockDeltaEvent(reply_id=REPLY_ID, block_id="b-2", delta="第二块。"),
+        TextBlockEndEvent(reply_id=REPLY_ID, block_id="b-2", text="第二块。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    warnings = "\n".join(_guard_logs(caplog, logging.WARNING))
+    assert "仍有 1 处形状表外的标记候选" in warnings, (
+        f"多块轮次的残留候选被重复计数（或丢计）：{warnings}"
+    )
+    assert "END 覆盖载荷 0 字" in warnings, (
+        f"非覆盖的真载荷被当成了覆盖载荷：{warnings}"
+    )
+
+
+def test_end_override_superset_of_delta_is_not_double_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 载荷是 DELTA 的超集（真覆盖）时，同一处候选只算一次（#21）。
+
+    ⚠️ 修前实测：``_report`` 拿「整轮 DELTA 拼接」与「END 覆盖载荷」两串
+    分头扫 ⇒ 载荷 ⊇ 正文时同一处候选被算两遍：用户可见 1 处、WARNING 报
+    「2 处（正文 38 字、END 覆盖载荷 44 字）」。修法是**逐块取生效文本**
+    （覆盖块取载荷、其余块取拼接），同一段文本只出现一次。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-1"),
+        TextBlockDeltaEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            delta="好的 [things were cleaned up thoroughly]",
+        ),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            text="好的 [things were cleaned up thoroughly] 再加一点。",
+        ),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    warnings = "\n".join(_guard_logs(caplog, logging.WARNING))
+    assert "仍有 1 处形状表外的标记候选" in warnings, (
+        f"覆盖载荷与正文里的同一处候选被算了两遍：{warnings}"
+    )
+
+
+def test_cross_block_join_does_not_fabricate_a_residual_candidate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 多块轮次的残留扫描**逐块**做，不许跨块拼出伪候选（#11 的 P4）。
+
+    ⚠️ 修前实测：把整轮正文拼成一串扫 ⇒ 块 1 结尾 ``[Luggage clea`` +
+    块 2 开头 ``red by customs]`` 拼出一个**两块里都不存在**的「标记候选」，
+    残留告警虚报（告警是要人去看的，虚报会把信噪比拉垮）。
+    逐块扫两头都躲开：真候选（在某一块内部成形）不漏，跨块的拼接不报。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-1"),
+        TextBlockDeltaEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            delta="参考价格 [Luggage clea",
+        ),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            text="参考价格 [Luggage clea",
+        ),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-2"),
+        TextBlockDeltaEvent(
+            reply_id=REPLY_ID,
+            block_id="b-2",
+            delta="red by customs]",
+        ),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="b-2",
+            text="red by customs]",
+        ),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    warnings = "\n".join(_guard_logs(caplog, logging.WARNING))
+    assert "标记候选" not in warnings, (
+        f"跨块拼接造出了伪候选（残留告警虚报）：{warnings}"
+    )
+
+
+def test_end_payload_marker_count_matches_the_markers_actually_stripped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ END 载荷里的标记处数按**实际**剥掉的数报，不许硬编码 1（#12）。
+
+    ⚠️ 修前实测：两块的 END 载荷各带 1 处标记时，WARNING 说「拦下**一**处」
+    （硬编码）、INFO 说「剥掉 …**1** 处内部标记」，而实际拦下 2 处 ——
+    运维按这条日志估「模型复读标记」的发生率会系统性偏低。
+    """
+    caplog.set_level(logging.INFO, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-1"),
+        TextBlockDeltaEvent(reply_id=REPLY_ID, block_id="b-1", delta="一。"),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="b-1",
+            text=f"一。{_MEASURED_MARKER}",
+        ),
+        TextBlockStartEvent(reply_id=REPLY_ID, block_id="b-2"),
+        TextBlockDeltaEvent(reply_id=REPLY_ID, block_id="b-2", delta="二。"),
+        TextBlockEndEvent(
+            reply_id=REPLY_ID,
+            block_id="b-2",
+            text=f"二。{_MEASURED_MARKER}",
+        ),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    infos = "\n".join(_guard_logs(caplog, logging.INFO))
+    assert "2 处内部标记" in infos, (
+        f"多处 END 载荷标记被少报（硬编码 1？）：{infos}"
+    )
+
+
+def test_empty_round_keeps_the_unresolved_rejection_reason() -> None:
+    """★★ 空轮**刻意不**清 ``pending_problem`` / ``ungrounded_limits``（#17 的处置）。
+
+    ⚠️ 第三轮对抗验证 #17 报的是「空轮不清状态，重试提示引用已翻篇的旧轮
+    原因」。处置**不是**清状态，而是让措辞在空轮夹在中间时仍然为真
+    （``你上一个候选答复`` 而不是 ``你刚才那段答复``）—— 理由写在
+    :meth:`_settle_round` 的注释里：被拒的原因这时**仍未解决**（模型这轮
+    什么都没给），清掉只会让提示退化成泛用版、更容易白费一轮。
+
+    ⚠️ 这条用例钉两件事：① 原因确实**留**着（提示里点名那个数）；
+    ② 措辞是「上一个候选答复」（空轮形状下依然诚实）。
+    只钉 ① 的话，措辞改回「刚才那段」也照样绿 —— 而那时这句话就是假的。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        # 写工具轮 ⇒ 这段文字按「给用户看的复述」保留 ⇒ 接地闸门跑
+        *_text("请确认：酒店差标 500 元/晚，金额 1200 元。"),
+        _tool_call("check_travel_policy"),
+        _tool_call("submit_approval"),
+        _call_end(),
+        # 空轮：模型什么都没产出，reply 在这里被重试吞掉
+        _call_start(),
+        _call_end(),
+        _reply_end(),
+        # 第二次重试机会：模型这轮给出可用答复
+        _call_start(),
+        *_text("查到了：酒店差标 600 元/晚。"),
+        _tool_call("check_travel_policy"),
+        _tool_call("submit_approval"),
+        _call_end(),
+        _reply_end(),
+    ]
+    agent = _FakeAgent(
+        tools={
+            "check_travel_policy": _FakeTool(is_read_only=True),
+            "submit_approval": _FakeTool(is_read_only=False),
+        },
+    )
+
+    asyncio.run(_run(ReplyGuardMiddleware(), events, agent))
+
+    hints = [
+        block.text
+        for _name, blocks in agent.state.context_calls
+        for block in blocks
+        for hint in (block.hint or [])
+        for block in [hint]
+        if getattr(block, "text", "")
+    ]
+    assert hints, f"一次纠正指令都没塞进去：{agent.state.context_calls!r}"
+    assert any("上一个候选答复" in text for text in hints), (
+        f"空轮之后提示仍在说「刚才那段答复」（那句话已经不真了）：{hints}"
+    )
+    assert any("500" in text for text in hints), (
+        f"空轮把未解决的原因清掉了，提示不再点名那个数：{hints}"
+    )
+
+
+def test_nested_marker_cascade_is_not_superlinear() -> None:
+    """★★ 嵌套/级联形状同样不许退回超线性（#0/#26 的回归钉子）。
+
+    ⚠️ 第三轮对抗验证实测（修前）：``"[tool_result pruned " * d + "]" * d``
+    这种**嵌套级联**里，每删一处都会在接缝上露出的新命中原样重扫全文 ——
+    d=2000（42 KB）**10.6 秒**、d=800（16.8 KB）**1.5 秒**。既有性能哨兵
+    只覆盖**平铺**形状（``"[tool_result pruned]" * 3200``），守不住这条。
+
+    修复后同一批输入：d=2000 约 0.13s、d=4000 约 0.35s（本机实测，
+    近线性）。阈值取 3s：距新实现 20 倍以上余量，距旧实现 3 倍以上。
+    """
+    depth = 2000
+    text = "[tool_result pruned " * depth + "]" * depth
+    start = time.perf_counter()
+    cleaned, removed = _strip_internal_markers(text)
+    elapsed = time.perf_counter() - start
+    assert (cleaned, removed) == ("", depth), (
+        f"嵌套级联没被剥干净：removed={removed}（期望 {depth}）"
+    )
+    assert elapsed < 3.0, (
+        f"嵌套级联 {len(text)} 字用了 {elapsed:.2f}s —— 清洗退化回超线性了"
+        "（旧实现 10.6s，批量不动点版 ~0.13s）"
+    )
+
+
+# ==============================================================================
+# 八、第三轮对抗验证的两个完整性缺口（2026-10-05，wf_7e634f25-73e 的 critics）
+# ==============================================================================
+#: 缺口 ① 的实测原文（思考链尾 + 下一段头，拼起来正是线上标记）。
+_GAP1_HEAD = _MEASURED_MARKER[: len(_MEASURED_MARKER) // 2]
+_GAP1_TAIL = _MEASURED_MARKER[len(_MEASURED_MARKER) // 2 :]
+
+
+def _thinking_block(block_id: str, text: str) -> list[EventBase]:
+    """构造一个思考块的 START → DELTA → END 事件。"""
+    return [
+        ThinkingBlockStartEvent(reply_id=REPLY_ID, block_id=block_id),
+        ThinkingBlockDeltaEvent(reply_id=REPLY_ID, block_id=block_id, delta=text),
+        ThinkingBlockEndEvent(reply_id=REPLY_ID, block_id=block_id, thinking=text),
+    ]
+
+
+def _thinking_visible(events: list[EventBase]) -> str:
+    """返回用户会看到的思考链文本（拼接 DELTA）。"""
+    return "".join(
+        event.delta
+        for event in events
+        if isinstance(event, ThinkingBlockDeltaEvent)
+    )
+
+
+def test_marker_split_across_two_thinking_blocks_is_cleaned() -> None:
+    """★★ 缺口 ①：标记被**思考块边界**拦腰截断时也不许上屏（thinking→thinking）。
+
+    ⚠️ 修前实测（第三轮对抗验证的完整性 critic）：思考块按
+    ``THINKING_BLOCK_END`` **逐块**结算，标记的前半截拿不到后半截 ——
+    两半各自通过清洗，而实时流与落库都是拼着的，用户看到的就是完整标记。
+    工具通道有 512 字留尾缓冲挡这个形状，思考链当时没有对应机制。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"先想一下。{_GAP1_HEAD}"),
+        *_thinking_block("t-2", f"{_GAP1_TAIL} 继续。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    thinking = _thinking_visible(out)
+    assert "postprune" not in thinking and "tool_result" not in thinking, (
+        f"标记跨思考块边界缝合后原样上屏：{thinking!r}"
+    )
+    assert "继续。" in thinking, f"清洗把真推理也删了：{thinking!r}"
+
+
+def test_marker_split_across_thinking_and_text_is_cleaned() -> None:
+    """★★ 缺口 ①（更重的变体）：思考链尾 + 正文字块头拼出完整标记。
+
+    ⚠️ 修前实测：这种切法连残留计数都没有（思考链只看自己那块、正文只
+    看自己这轮），指标只有 ``clean``、零 WARNING —— 落库后
+    ``ThinkingBlock`` + ``TextBlock`` 拼起来就是完整标记。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"先想一下。{_GAP1_HEAD}"),
+        *_text(f"{_GAP1_TAIL} 好的。已办妥。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _visible(out)
+    thinking = _thinking_visible(out)
+    assert "postprune" not in visible and "tool_result" not in visible, (
+        f"标记跨「思考块→正文块」边界缝合后原样上屏：{visible!r}"
+    )
+    assert "postprune" not in thinking and "tool_result" not in thinking, (
+        f"标记前半截留在了思考链里：{thinking!r}"
+    )
+    assert visible == "好的。已办妥。", f"正文被改坏了：{visible!r}"
+
+
+def test_uncompleted_carry_is_kept_as_content_not_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 扣来的半截前缀没等到下半截时：**不删**，原样发出 + WARNING（Round-4）。
+
+    ⚠️ 旧实现在这里把前缀删掉（判据「洗过之后它还在原处」），Round-4 的
+    refuter 实测：删的往往不只是碎片 —— ``[tool_result clea`` 后面接着
+    真内容时，``startswith`` 成立、整段被切掉、指标还记 ``clean``。修补后
+    的取舍是「宁漏不删」：文本原样上屏（碎片由残留扫描的第三模式计数 +
+    一条 WARNING），只有回复结束时的**确信族**碎片才丢弃并记账。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"先想一下。{_GAP1_HEAD}"),
+        *_thinking_block("t-2", "换个话题。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    thinking = _thinking_visible(out)
+    assert thinking == f"先想一下。{_GAP1_HEAD}换个话题。", (
+        f"未完成的前缀被删了或者搬错了位置（内容不丢才是新契约）：{thinking!r}"
+    )
+    assert any(
+        "没有等到下半截" in record.getMessage()
+        for record in caplog.records
+    ), f"未完成的前缀消失了却没留 WARNING：{[r.getMessage() for r in caplog.records]}"
+
+
+def test_partial_marker_prefix_at_reply_end_is_dropped_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 扣在手里的半截前缀等不到下半截时：丢弃，但要**看得见**（缺口 ① 收尾）。
+
+    ⚠️ 反向约束：发出去 = 用户屏幕上出现 ``[tool_result clea``；静默丢弃 =
+    内容无声消失。选丢弃（扣着的判据只认标记族开头，丢的不是用户内容），
+    代价是必须计数 —— 残留总数 + WARNING，两样都钉在这里。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"先想一下。{_GAP1_HEAD}"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _visible(out) + _thinking_visible(out)
+    assert "tool_result" not in visible and "clea" not in visible, (
+        f"没写完的半截标记前缀上屏了：{visible!r}"
+    )
+    assert "residual_internal_marker" in seen, (
+        f"半截前缀被静默丢弃 —— 残留没有计数：{seen}"
+    )
+    assert any(
+        "没写完的内部标记前缀" in record.getMessage()
+        for record in caplog.records
+    ), f"丢弃半截前缀没留 WARNING：{[r.getMessage() for r in caplog.records]}"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "还没算完] 继续。",  # 方括号族，但不是标记族开头
+        "继续。",  # 根本没有方括号
+    ],
+)
+def test_non_marker_tail_at_a_block_seam_is_not_moved(tail: str) -> None:
+    """★★ 反向约束：块边界上**不是**标记开头的内容，一个字都不许挪（缺口 ① 的护栏）。
+
+    ⚠️ 缝合机制动的是**要发给用户的文本**，所以判据只认标记族自己的开头
+    （``[tool…`` / ``[old tool…`` / ``[inline…`` / ``<system…``）。认任意
+    方括号的话，正文里 ``[Luggage clea`` + ``red by customs]`` 这种真内容
+    会被扣走、在下一块里冒出来 —— 那比漏一个标记更糟。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", "先想一下。[预算"),
+        *_thinking_block("t-2", tail),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    assert _thinking_visible(out) == f"先想一下。[预算{tail}", (
+        f"非标记内容被跨块搬家了：{_thinking_visible(out)!r}"
+    )
+
+
+def test_tool_call_name_with_a_marker_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ 缺口 ②：``ToolCallStartEvent.tool_call_name`` 里的标记必须洗掉。
+
+    ⚠️ 修前实测（第三轮对抗验证的完整性 critic）：这个名字模型可写、
+    前端当执行链标题、``Msg.append_event`` 又把它写进 ``ToolCallBlock.name``
+    落库 —— 而守卫**根本没看**这个字段（残留计数为 0、零 WARNING）。
+    实测名字为 ``[tool_result pruned]`` 时原样透传并落库。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id="c1",
+            tool_call_name=_MEASURED_MARKER,
+        ),
+        _tool_call_delta("c1", '{"city": "杭州"}'),
+        _tool_call_end("c1"),
+        _text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    names = [
+        event.tool_call_name
+        for event in out
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    assert names == [""], (
+        f"工具名里的标记没洗干净（前端标题与落库的 name 都用它）：{names}"
+    )
+    assert "stripped_internal_marker" in seen, (
+        f"洗了工具名却没记账 —— 曲线看不出模型在复读标记：{seen}"
+    )
+    assert any(
+        "工具名" in record.getMessage() for record in caplog.records
+    ), f"洗工具名没留 WARNING：{[r.getMessage() for r in caplog.records]}"
+
+
+def test_tool_result_name_with_a_marker_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 缺口 ② 的另一半：``ToolResultStartEvent.tool_call_name`` 同样要洗。
+
+    ⚠️ 上游对同一处标记写**两个**字段（``ToolCallBlock.name`` 与
+    ``ToolResultBlock.name``，见 ``agentscope/message/_base.py`` 的两个
+    分支），只洗其中一个等于没洗 —— 结果块那个照样上屏、照样落库。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        _tool_result_start("c1", name=_MEASURED_MARKER),
+        _tool_result_delta("c1", "结果。"),
+        _tool_result_end("c1"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    names = [
+        event.tool_call_name
+        for event in out
+        if isinstance(event, ToolResultStartEvent)
+    ]
+    assert names == [""], f"工具结果块的名字没洗：{names}"
+    assert "stripped_internal_marker" in seen, seen
+
+
+def test_clean_tool_name_is_passed_through_unchanged() -> None:
+    """★ 反向约束：干净的工具名必须**原对象**透传（缺口 ② 的护栏）。
+
+    ⚠️ 守卫对工具名做的是「洗标记」而不是「改名字」：合法工具名里不可能
+    出现标记形状，所以命中即异常。这条钉住「没命中就一个字都不动」——
+    连事件对象都不该换（换了会让下游的身份判断失效）。
+    """
+    start = ToolCallStartEvent(
+        reply_id=REPLY_ID,
+        tool_call_id="c1",
+        tool_call_name="check_travel_policy",
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        start,
+        _tool_call_delta("c1", "{}"),
+        _tool_call_end("c1"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    passed = [event for event in out if isinstance(event, ToolCallStartEvent)]
+    assert len(passed) == 1 and passed[0] is start, (
+        "干净的工具调用事件被换了对象 —— 判据不该动没命中的事件"
+    )
+
+
+# ==============================================================================
+# 九、第四轮对抗验证的修复（2026-10-05，wf_0202c1d5-434：14 survivors + 6 critics）
+# ==============================================================================
+#: 跨块切分用的 system 标签原文（③ 的形状：开/闭标签 + 内容）。
+_SYSTEM_PAIR_SOURCE = "<system-reminder>SECRET</system-reminder>"
+#: 孤立闭标签（④ 剥它、留内容）—— 同样会被块边界截断。
+_LONE_CLOSE_TAG = "</system-reminder>"
+#: 嵌套方括号尾（前一个方括号头未写完、后面又开一个）：宽判据只看得到
+#: 第二个 ``[``，要靠**清洗之后**的二次扣尾才能整段扣住。
+_NESTED_TAIL = "[tool_result pruned[toolA"
+
+
+@pytest.mark.parametrize(
+    "cut",
+    range(len(_SYSTEM_PAIR_SOURCE) + 1),
+    ids=lambda n: f"cut@{n}",
+)
+@pytest.mark.parametrize("second_channel", ["thinking", "text"])
+def test_system_tag_split_across_blocks_is_cleaned(
+    cut: int,
+    second_channel: str,
+) -> None:
+    """★★ G1：``<system-*>`` 标签跨块时，切点落在**任何**位置都不许上屏。
+
+    ⚠️ Round-4 的 refuter 实测（修前）：旧实现只在**清洗后**的文本上找
+    system 开标签 —— 而孤立开标签早被 ④ 删掉了，这条分支是**死代码**。
+    跨块的 ``<system-*>SECRET</system-*>` 因此两半各自干净、拼起来完整上屏。
+    切在标签名内部（``<system-rem``）时连 ④ 都认不出，两半拼起来把开标签
+    **重新拼出来**。修补：判据回到**原文**上求 + 新增「未写完的标签头」臂。
+
+    Args:
+        cut (`int`): 切点（第一段 = 切点前的字，第二段 = 其余）。
+        second_channel (`str`): 第二段走思考块还是正文轮（两条结算路径）。
+    """
+    head = _SYSTEM_PAIR_SOURCE[:cut]
+    tail = _SYSTEM_PAIR_SOURCE[cut:]
+    if second_channel == "thinking":
+        second: list[EventBase] = _thinking_block("t-2", f"{tail} B")
+    else:
+        second = _text(f"{tail} B")
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"A{head}"),
+        *second,
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _visible(out) + _thinking_visible(out)
+    assert "SECRET" not in visible and "system" not in visible, (
+        f"切在第 {cut} 字（{second_channel}）时 system 标签上屏了：{visible!r}"
+    )
+    assert "A" in visible and "B" in visible, (
+        f"标签两侧的真内容被误删了：{visible!r}"
+    )
+
+
+@pytest.mark.parametrize("cut", range(len(_LONE_CLOSE_TAG) + 1), ids=lambda n: f"cut@{n}")
+def test_split_lone_close_tag_is_cleaned(cut: int) -> None:
+    """★★ G1 的另一半：**孤立闭标签**被块边界截断时也不许上屏。
+
+    ⚠️ 自查穷举探针发现（修前）：扣留判据只认**开**标签头，``'A|</'``
+    + ``'system-reminder>…'`` 这种切法两块拼出完整的 ``</system-reminder>``
+    —— ④ 本会剥掉孤立闭标签，但它看到的每一块里标签都是碎的。
+    """
+    head = _LONE_CLOSE_TAG[:cut]
+    tail = _LONE_CLOSE_TAG[cut:]
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"A|{head}"),
+        *_thinking_block("t-2", f"{tail}SECRET|B"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _thinking_visible(out)
+    assert "system-reminder" not in visible, (
+        f"切在第 {cut} 字时闭标签拼出来了：{visible!r}"
+    )
+    assert "SECRET" in visible and visible.startswith("A|"), (
+        f"闭标签的内容/上下文被牵连：{visible!r}"
+    )
+
+
+@pytest.mark.parametrize("cut", [0, 1, 2, 3, 4, 5, 12, 19])
+def test_marker_split_at_a_short_prefix_is_cleaned(cut: int) -> None:
+    """★★ G2：切点落在标记头 1–5 个字（``[`` / ``[t`` / ``[to`` …）时也要干净。
+
+    ⚠️ Round-4 的 seam 镜片实测（修前）：旧扣留判据要求 ``tool`` / ``inline``
+    **字面量完整**（``[\\[［【]\\s*(?:old|previous)?(?:tool|inline)``），切在
+    ``[t`` / ``[to`` 上时半截头不被扣留 → 两块拼起来完整标记上屏。修补：
+    扣留改用**宽判据**（任意未闭合的方括号尾，体为 ASCII 标记字符），
+    「删/清」类决定仍只用窄判据 —— 扣留零损失，宽一点没有代价。
+    """
+    marker = "[tool_result pruned]"
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"想一下。{marker[:cut]}"),
+        *_thinking_block("t-2", f"{marker[cut:]} 继续。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _thinking_visible(out) + _visible(out)
+    assert "pruned" not in visible and "tool_result" not in visible, (
+        f"切在第 {cut} 字时完整标记拼出来了：{visible!r}"
+    )
+    assert "继续。" in visible, f"标记之外的内容被牵连：{visible!r}"
+
+
+def test_marker_longer_than_the_old_holdback_window_is_cleaned() -> None:
+    """★★ CG1：标记体超过旧扣留窗口（80 字）时同样不许上屏。
+
+    ⚠️ Round-4 的 completeness critic 实测（修前）：扣留窗口 ``{0,80}``
+    比形状表可剥的最长标记（② 句式 ≈190 字）**更窄** ——
+    ``[tool_result cleared by postprune: `` + 55 个 ``x`` + ``]``（91 字，
+    清洗器**整处剥得掉**）的头 40 字扣不住，两块拼起来完整标记上屏。
+    修补：窗口放到 200（覆盖形状表可剥的最大长度）。
+    """
+    marker = "[tool_result cleared by postprune: " + "x" * 55 + "]"
+    assert len(marker) > 80, "样本必须超过旧窗口，否则测不到这条"
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", f"想一下。{marker[:40]}"),
+        *_thinking_block("t-2", f"{marker[40:]} 继续。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _thinking_visible(out) + _visible(out)
+    assert "cleared by" not in visible and "xxx" not in visible, (
+        f"超长标记跨块后上屏了：{visible!r}"
+    )
+    assert "继续。" in visible, visible
+
+
+def test_marker_split_between_thinking_and_tool_payload_is_cleaned() -> None:
+    """★★ G5：标记横跨「思考链 → 工具载荷」的缝时，两条通道要缝在一起洗。
+
+    ⚠️ Round-4 的 frontier 镜片实测（修前）：思考块扣下的 ``[tool_result clea``
+    与工具调用参数里的 ``red by postprune]}`` 分属两条通道，各自留尾、
+    谁也看不到完整标记 —— 拼起来完整标记上屏。修补：工具流入口检测
+    「标记起点在扣留里、终点在本条载荷里」时把两半拼起来一起洗。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", "先查一下。[tool_result clea"),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id="c1",
+            tool_call_name="check_travel_policy",
+        ),
+        _tool_call_delta("c1", "red by postprune]}"),
+        _tool_call_delta("c1", "尾部内容"),
+        _tool_call_end("c1"),
+        _text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    deltas = "".join(
+        event.delta
+        for event in out
+        if isinstance(event, ToolCallDeltaEvent)
+    )
+    assert "尾部内容" in deltas, f"标记后面的载荷被牵连：{deltas!r}"
+    # ⚠️ 断言必须查**所有通道的并集**（2026-10-05 由变异测试 M46 击穿后订正）：
+    # 标记横跨思考链与工具载荷两个通道时，逐通道各查一个子串会漏 —— 把缝合
+    # 关掉后，前半截进思考链（被回复结束丢弃）、`red by postprune]}` 留在
+    # 载荷里，而原来那两条断言各自都成立。查并集才问得出「整处标记有没有
+    # 上屏」这个问题。
+    visible = _thinking_visible(out) + deltas + _visible(out)
+    for half in ("tool_result", "red by", "postprune"):
+        assert half not in visible, f"跨通道的标记漏出来了：{visible!r}"
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "[tool_result clea",  # 窄判据也认（[tool…）
+        "[Luggage clea",  # 只有**宽**判据认（任意方括号头）—— 名字通道专用
+    ],
+)
+def test_tool_name_with_a_partial_marker_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+    fragment: str,
+) -> None:
+    """★★ G4：工具名是**半截**标记头时，整名清空 + 记账。
+
+    ⚠️ Round-4 的 toolname 镜片实测（修前）：``_scrub_tool_call_name`` 只认
+    **完整**标记（``_has_internal_marker`` 预筛），名字被流式截成
+    ``[tool_result clea`` 时判据一个都不命中 → 原样透传 + 落库。名字本该
+    是标识符，任何「像标记开头」的形状都不可能是合法工具名（宽判据）。
+
+    ⚠️ 参数里的第二种碎片（``[Luggage clea``）是**只有宽判据认**的形状：
+    它同时钉住「名字通道用宽判据、正文通道用窄判据」这条分工 —— 如果名字
+    通道退回窄判据（或预筛去掉宽判据），这条就红。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        ToolCallStartEvent(
+            reply_id=REPLY_ID,
+            tool_call_id="c1",
+            tool_call_name=fragment,
+        ),
+        _tool_call_delta("c1", "{}"),
+        _tool_call_end("c1"),
+        _text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    names = [
+        event.tool_call_name
+        for event in out
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    assert names == [""], f"半截标记工具名没清掉：{names}"
+    assert "stripped_internal_marker" in seen, seen
+
+
+def test_hint_block_marker_is_scrubbed_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ CG2：``HintBlockEvent.hint`` 是第五条上屏且落库的通道。
+
+    ⚠️ Round-4 的 completeness critic 实测（修前）：``hint``（``str`` 或
+    ``TextBlock`` 列表）既不在清洗通道里、也不在残留扫描里 ——
+    ``Msg.append_event`` 的 ``HINT_BLOCK`` 分支把它原样落库。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        HintBlockEvent(
+            reply_id=REPLY_ID,
+            block_id="h-1",
+            hint=f"提示：{_MEASURED_MARKER} 结束",
+        ),
+        HintBlockEvent(
+            reply_id=REPLY_ID,
+            block_id="h-2",
+            hint=[TextBlock(type="text", text=f"列表{_MEASURED_MARKER}")],
+        ),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    hints = [
+        event.hint for event in out if isinstance(event, HintBlockEvent)
+    ]
+    assert len(hints) == 2, hints
+    assert hints[0] == "提示： 结束", f"字符串 hint 没洗：{hints[0]!r}"
+    assert hints[1][0].text == "列表", f"块列表 hint 没洗：{hints[1]!r}"
+    assert "stripped_internal_marker" in seen, seen
+
+
+def test_data_block_name_and_media_type_are_scrubbed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ G6：``DataBlockStartEvent`` 的 ``name`` / ``media_type`` 同类字段要洗。
+
+    ⚠️ Round-4 的 toolname 镜片：这两个字段与 ``tool_call_name`` 一样会被
+    ``Msg.append_event``（``DATA_BLOCK_START`` 分支）落库，此前不在任何
+    清洗通道里。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        DataBlockStartEvent(
+            reply_id=REPLY_ID,
+            block_id="d-1",
+            name="[tool_result pruned",
+            media_type="[inline cleaned",
+        ),
+        HintBlockEvent(reply_id=REPLY_ID, block_id="h-1", hint="查完了。"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    data_starts = [
+        event for event in out if isinstance(event, DataBlockStartEvent)
+    ]
+    assert len(data_starts) == 1, data_starts
+    assert data_starts[0].name == "" and data_starts[0].media_type == "", (
+        f"data 块的 name/media_type 没清："
+        f"{data_starts[0].name!r} / {data_starts[0].media_type!r}"
+    )
+    assert "stripped_internal_marker" in seen, seen
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "[tool_result clea",  # 残留扫描认得（第三模式）—— 只能数一笔
+        "[inline clea",  # 扫描认不出（不属于任何残留模式）—— 由显式那一笔补
+    ],
+)
+def test_tool_stream_tail_with_a_confident_head_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tail: str,
+) -> None:
+    """★★ 工具载荷结尾是**确信**的半截标记时：不改载荷，但必须计数（且只数一笔）。
+
+    ⚠️ 工具载荷属于「执行链可见性」，不能像正文那样扣尾顺延（扣了会改掉
+    工具返回值）。半截标记的下半截只可能从别的通道来，而这条流已经收尾
+    —— 所以这里的取舍是「原样发出 + 计数 + WARNING」，让运维看得见。
+
+    ⚠️ 反面的坑（2026-10-05 自查）：显式计数与起点归属扫描**同时**命中
+    同一处尾碎片时（``[tool_result clea`` 就在残留模式里），日志从
+    「工具载荷 1 处」变成「2 处」。所以两条参数各钉一侧：扫描认得的碎片
+    由扫描数、显式那笔必须让位；扫描认不出的（``[inline clea``）才由
+    显式那笔补上 —— 两种形状最终都恰好 1 处。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        _tool_result_start("c1", name="check_travel_policy"),
+        _tool_result_delta("c1", f"查到了 {tail}"),
+        _tool_result_end("c1"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    deltas = "".join(
+        event.delta
+        for event in out
+        if isinstance(event, ToolResultTextDeltaEvent)
+    )
+    assert "查到了" in deltas, f"载荷被改动（本就不该动）：{deltas!r}"
+    assert "residual_internal_marker" in seen, (
+        f"工具载荷结尾的半截标记没计数：{seen}"
+    )
+    counted = [
+        record.getMessage()
+        for record in caplog.records
+        if "工具载荷" in record.getMessage() and "标记候选" in record.getMessage()
+    ]
+    assert counted and "工具载荷 1 处" in counted[-1], (
+        f"同一处尾碎片被数了两遍或没数：{counted}"
+    )
+
+
+def test_exception_path_counts_the_dropped_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ CG3：没有 ``ReplyEndEvent`` 的异常路径上，扣着的前缀也要记账。
+
+    ⚠️ Round-4 的 completeness critic 实测（修前）：``ReplyEndEvent`` 分支
+    是唯一调用「定性扣留前缀」的地方 —— 异常/取消路径上（模型/上游抛错）
+    扣着的内容既没上屏、也没记账，**静默消失**。修补：``finally`` 里补一笔。
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.orchestration.reply_guard.observe_reply_guard",
+        seen.append,
+    )
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", "想一下。[tool_result clea"),
+        _call_end(),
+    ]
+
+    async def handler(**_kwargs: Any) -> AsyncGenerator[EventBase, None]:
+        """先把事件发完，再抛（模拟模型侧异常）。"""
+        for event in events:
+            yield event
+        raise RuntimeError("模型侧异常")
+
+    async def drive() -> list[EventBase]:
+        out: list[EventBase] = []
+        async for event in ReplyGuardMiddleware().on_reply(
+            agent=_FakeAgent(),
+            input_kwargs={"inputs": None},
+            next_handler=handler,
+        ):
+            out.append(event)
+        return out
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(drive())
+
+    assert "residual_internal_marker" in seen, (
+        f"异常路径上扣着的前缀静默消失了：{seen}"
+    )
+
+
+def test_full_width_bracket_fragment_at_reply_end_is_emitted_as_content() -> None:
+    """★★ CG4：全角 ``【`` 的碎片在回复结束时**原样发出**，不许删。
+
+    ⚠️ Round-4 的 completeness critic 实测（修前）：``【`` 被扣留判据接受、
+    却不被清洗器接受（①②③④ 都刻意不剥 ``【…】``）—— 回复结束时旧实现
+    按「是标记族开头」把它删掉，屏幕上少一段、指标还记 ``clean``。
+    修补：扣留判据宽、删除判据窄（``【`` 不在窄判据里），碎片按内容发出。
+    """
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", "先想一下。【tool_result clea"),
+        _call_end(),
+        _reply_end(),
+    ]
+    out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    visible = _thinking_visible(out) + _visible(out)
+    assert "【tool_result clea" in visible, (
+        f"全角括号碎片被删了（内容丢失）：{visible!r}"
+    )
+
+
+def test_nested_bracket_tail_is_held_whole_until_the_settlement() -> None:
+    """★★ Round-4 自查：清洗**之后**要在新结尾上**再扣一次**尾。
+
+    ⚠️ 宽判据的正则要求 `[` 到行尾之间**没有别的方括号**（体类里不含
+    ``[``/``]``）。于是 ``先想一下。[tool_result pruned[toolA`` 这种「前一个
+    方括号头还没写完、后面又开了一个」的形状，清洗前的那一次扣尾只会从
+    **第二个** ``[`` 起扣 —— 前半截 ``[tool_result pruned`` 留在``body`` 里
+    当正文发出去（它是半截标记头，屏幕上不该出现）；而且剩下的 ``[toolA``
+    会被判成确信族、回复结束时**丢弃**，等于一处分片被劈成两半各错一次。
+
+    修补：清洗（可能删掉中间那处完整标记）之后再在新结尾上求一次扣尾，
+    两段扣留按原文顺序拼接。断言两条：
+
+        · ``thinking`` 里**没有**半截头（它被整段扣住了，没当成正文发）；
+        · 回复结束时整段碎片按**宽族**原样发出（不丢内容）。
+    """
+    for channel in ("thinking", "text"):
+        events: list[EventBase] = [_reply_start(), _call_start()]
+        if channel == "thinking":
+            events += _thinking_block("t-1", f"先想一下。{_NESTED_TAIL}")
+        else:
+            events += _text(f"先想一下。{_NESTED_TAIL}")
+        events += [_call_end(), _reply_end()]
+        out = asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+        thinking = _thinking_visible(out)
+        visible = _visible(out)
+        if channel == "thinking":
+            assert thinking == "先想一下。", (
+                f"半截标记头当正文发出去了（二次扣尾没生效）：{thinking!r}"
+            )
+        else:
+            assert visible == f"先想一下。{_NESTED_TAIL}", (
+                f"正文通道的二次扣尾没生效：{visible!r}"
+            )
+        assert _NESTED_TAIL in (thinking + visible), (
+            f"整段扣留的碎片被删了（内容丢失）：{thinking!r} + {visible!r}"
+        )
+
+
+def test_survived_carry_is_counted_exactly_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★★ Round-4 自查：扣来的半截前缀**只记一笔**，不许与残留扫描双计。
+
+    ⚠️ 试过的错：在 ``_confident_carry_survived`` 分支里补
+    ``residual_precount += 1``。但碎片是**随本段上屏**的 —— 回复结束时的
+    残留扫描（第三模式的半截行锚）已经数到它了，再补一笔就是同一个碎片
+    数两遍（实测日志从「仍有 1 处」变成「仍有 2 处」）。所以那一笔被删掉，
+    只留 WARNING；本用例把「只记一笔」钉死在日志文案上。
+    """
+    caplog.set_level(logging.WARNING, logger=_GUARD_LOGGER)
+    events = [
+        _reply_start(),
+        _call_start(),
+        *_thinking_block("t-1", "想一下。[tool"),
+        *_thinking_block("t-2", "结果"),
+        *_text("好的。"),
+        _call_end(),
+        _reply_end(),
+    ]
+    asyncio.run(_run(ReplyGuardMiddleware(), events, _FakeAgent()))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("没有等到下半截" in message for message in messages), messages
+    counted = [message for message in messages if "仍有" in message and "标记候选" in message]
+    assert len(counted) == 1, f"残留上报条数不对：{messages}"
+    assert "仍有 1 处" in counted[0] and "剥离前预记 0 处" in counted[0], (
+        f"同一个碎片被数了两遍（预记与扫描双计）：{counted[0]}"
     )
