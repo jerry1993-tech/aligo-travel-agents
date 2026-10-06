@@ -1,9 +1,9 @@
-# AliGo 智能差旅助手
+# 多智能体智能差旅助手（AgentScope 2.0.x · 仿阿里商旅）
 
-基于 **AgentScope 2.0.9**（pip 安装，版本由 `requirements.txt` 钉死）从零实现的企业级多智能体差旅助手：把「出差事项收集 → 行程规划 → 差标核对 → 申请单提交」的业务闭环，落成一条可流式、可观测的智能体链路。智能体、工具、中间件、事件流等框架已有的能力一律 `import agentscope` 调用，本仓库只实现框架没有的部分 —— 差旅业务域、工具集、知识库策略、长期记忆、评测与业务 API。
+基于 **AgentScope 2.0** 从零实现的企业级多智能体差旅助手：把一句自然语言差旅诉求拆成机票、酒店、行程、审批等子任务，交由不同子 Agent 协同完成，卡片化流式呈现。实现「出差事项收集 → 行程规划 → 差标核对 → 申请单提交」的业务闭环，落成一条可流式、可观测的智能体链路。智能体、工具、中间件、事件流等框架已有的能力一律 `import agentscope` 调用，本仓库只实现框架没有的部分 —— 差旅业务域、工具集、知识库策略、长期记忆、评测与业务 API。
 
 > ⚠️ 本仓库的「下单」环节止于**提交出差申请单 + HITL 人工确认**，没有真实的出票 / 预订工具。
-> 业务架构参考[阿里商旅 AliGo 博客](https://agentscope.io/blog/alibaba-business-travel/)（原文存档见 [`docs/博客原文-Alibaba-Business-Travel.md`](docs/博客原文-Alibaba-Business-Travel.md)）；博客是 AgentScope 1.x 时代的写法，API 一律以本地安装的包为准。
+> 业务架构参考[阿里商旅 AliGo 博客](https://agentscope.io/blog/alibaba-business-travel/)（原文存档见 [`docs/博客原文-Alibaba-Business-Travel.md`](docs/博客原文-Alibaba-Business-Travel.md)）。
 
 ## ✨ 核心亮点
 
@@ -169,6 +169,8 @@ make smoke                        # 端到端冒烟，退出码 0 = 通过
 ### 6. 打开网页
 
 浏览器访问 **<http://localhost:8000/>**：首次进入是「连接到服务器」引导页，服务器地址填 `http://localhost:8000`，用户名填 `alice`。身份**大小写敏感**（`Alice` ≠ `alice`）；这套登录没有密码，只适合本机或内网演示，不要暴露到公网。
+
+![业务界面演示](./docs/media/Aligo_demo.gif)
 
 ### 本地开发（不跑容器）
 
