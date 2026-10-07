@@ -468,9 +468,13 @@ async def probe_collection(
     try:
         return await asyncio.wait_for(_probe(), timeout=timeout)
     except asyncio.TimeoutError:
+        # ⚠️ 这里**必须**走 ``redact``：超时分支是唯一一条「我们主动拼出
+        # URI」的路径，而 Milvus 的 URI 支持 ``http://user:pass@host`` 写法。
+        # 少了它，密码会随 ``/readyz`` 的响应体一起被贴进工单 ——
+        # 而这一条正是本函数 docstring 第 1 条要防的那个泄漏面。
         return {
             "ok": False,
-            "error": f"Milvus 探测超时（{timeout}s）：{settings.milvus.uri}",
+            "error": f"Milvus 探测超时（{timeout}s）：{redact(settings.milvus.uri)}",
         }
     except Exception as exc:  # noqa: BLE001 —— 探针永不抛，见 docstring 第 1 条
         # ⚠️ 错误信息要脱敏：Milvus 的 URI 可能带 ``user:pass@``，

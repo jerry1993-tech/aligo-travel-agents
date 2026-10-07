@@ -205,3 +205,44 @@ def test_a_missing_collection_is_reported_not_created_silently(
     monkeypatch.setattr(milvus_init, "build_vector_store", lambda settings: store)
 
     assert asyncio.run(milvus_init._run(settings)) == 1
+
+
+def test_the_repair_command_does_not_leak_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """★★ 手工修复命令里**绝不能**出现配置中的密码。
+
+    ⚠️ 这行输出是给运维复制粘贴执行的，因此它会出现在 CI 日志、工单和
+    聊天窗口的截图里 —— 读者范围比「能读到配置文件的人」广得多。
+
+    ⚠️ 三条断言缺一不可，各堵一个方向：
+
+    · 「密码不在」—— 直接的那条。
+    · 「占位符在」—— 只钉上一条的话，把整条命令删掉也能让用例变绿，
+      而那条命令本身是有用的（见上一个用例）。
+    · 「说清了占位符要替换」—— 脱敏让命令**不可直接执行**，脚本必须
+      明说。否则运维会以为命令写错了，而一条「看起来对、跑起来错」的
+      提示比没有提示更浪费时间。
+    """
+    from tests.conftest import TEST_ENVIRON
+
+    from src.config import load_settings
+
+    leaky = load_settings(
+        "test",
+        environ={
+            **TEST_ENVIRON,
+            "ALIGO__MILVUS__URI": "http://aligo:s3cret-pw@milvus:19530",
+        },
+        dotenv=False,
+    )
+    store = _FakeStore(dimension=512)  # 与配置的 1024 不符
+    monkeypatch.setattr(milvus_init, "build_vector_store", lambda settings: store)
+
+    assert asyncio.run(milvus_init._run(leaky)) == 1
+
+    output = capsys.readouterr().out
+    assert "s3cret-pw" not in output, f"修复命令里泄漏了密码：{output}"
+    assert "***:***@" in output, "占位符不见了 —— 但修复命令本身不该被删掉"
+    assert "ALIGO__MILVUS__URI" in output, "没告诉运维占位符要换成真实值"

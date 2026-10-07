@@ -17,8 +17,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import socket
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -584,3 +587,143 @@ def test_env_example_keys_are_all_accepted_by_the_loader() -> None:
 
     settings = load_settings("test", environ=environ, dotenv=False)
     assert isinstance(settings, Settings)
+
+
+# ==============================================================================
+# 六、宿主机直连改写（host_side=True）
+# ==============================================================================
+# 为什么这组用例要 monkeypatch ``socket.getaddrinfo`` 而不是赌 ``milvus`` 解析不了：
+# 结果会取决于跑测试那台机器的 ``/etc/hosts``。作者机器上恒绿的用例、换台机器恒红
+# （或反过来）是本项目反复吃过亏的一类假信号，所以这里把「解析得了吗」变成显式输入。
+def _make_unresolvable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让本进程内一切主机名解析都失败。"""
+
+    def _raise(*_args: object, **_kwargs: object) -> object:
+        raise socket.gaierror(8, "nodename nor servname provided, or not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _raise)
+
+
+def test_host_side_rewrites_compose_services_to_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``host_side=True`` 时三个服务名都换成 ``127.0.0.1``，**端口原样保留**。
+
+    端口保留的前提是 compose 对这三个服务用的是同端口映射
+    （``docker-compose.yaml`` 的 ``ports`` 段：19530 / 5432 / 6379）。
+    这条用例同时把「端口」钉住 —— 改映射却忘了改 loader 时，它会红。
+    """
+    _make_unresolvable(monkeypatch)
+
+    settings = load_settings("dev", environ={}, dotenv=False, host_side=True)
+
+    assert urlsplit(settings.milvus.uri).hostname == "127.0.0.1"
+    assert urlsplit(settings.milvus.uri).port == 19530
+    assert urlsplit(settings.db.url).hostname == "127.0.0.1"
+    assert urlsplit(settings.db.url).port == 5432
+    assert urlsplit(settings.redis.url).hostname == "127.0.0.1"
+    assert urlsplit(settings.redis.url).port == 6379
+
+
+def test_default_loading_keeps_container_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不传 ``host_side`` 时，**即使主机名解析不了也绝不改写**。
+
+    ⚠️ 容器路径全部走默认值，所以这条钉的是「新加的兜底不会外溢到 app」：
+    容器里若被改写成 ``127.0.0.1``，应用连的是**它自己**，症状是
+    「Milvus 明明起着，集合却一个都没有」—— ``src/server/app.py:238``
+    那段注释说的就是这个坑。用例刻意让解析失败，以确保「没改写」不是因为
+    「解析成功了」，而是因为默认关闭。
+    """
+    _make_unresolvable(monkeypatch)
+
+    settings = load_settings("dev", environ={}, dotenv=False)
+
+    assert urlsplit(settings.milvus.uri).hostname == "milvus"
+    assert urlsplit(settings.db.url).hostname == "postgres"
+    assert urlsplit(settings.redis.url).hostname == "redis"
+
+
+def test_host_side_leaves_resolvable_hostnames_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """解析得了就一个都不动 —— 真的在容器内跑时，行为与改动前逐字一致。"""
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: [])
+
+    settings = load_settings("dev", environ={}, dotenv=False, host_side=True)
+
+    assert urlsplit(settings.milvus.uri).hostname == "milvus"
+    assert urlsplit(settings.db.url).hostname == "postgres"
+    assert urlsplit(settings.redis.url).hostname == "redis"
+
+
+def test_host_side_ignores_non_compose_hostnames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自定义主机名哪怕解析不了也不动。
+
+    改写成 ``127.0.0.1`` 会把「内网 DNS 没配好」误诊成「服务没起来」——
+    与 ``_check_redis`` 那条「不许静默回落」同一个理由。
+    """
+    _make_unresolvable(monkeypatch)
+
+    settings = load_settings(
+        "dev",
+        environ={"ALIGO__MILVUS__URI": "http://milvus.corp.internal:19530"},
+        dotenv=False,
+        host_side=True,
+    )
+
+    assert urlsplit(settings.milvus.uri).hostname == "milvus.corp.internal"
+
+
+def test_host_side_preserves_credentials_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """改写只动主机名：netloc 里内嵌的密码（含百分号转义）逐字保留。
+
+    ⚠️ 这条是「先 urlsplit 再拼 netloc」那种写法的守门人。重建 netloc 要先解码
+    密码再编码回去，往返一旦不一致就把密码改坏了 —— 而症状是「鉴权失败」，
+    看起来与地址毫无关系。这里断言的是**整串相等**，不是「密码还在」。
+    """
+    _make_unresolvable(monkeypatch)
+    raw = "postgresql+asyncpg://aligo:p%40ss:w%2Frd@postgres:5432/aligo"
+
+    settings = load_settings(
+        "dev",
+        environ={"ALIGO__DB__URL": raw},
+        dotenv=False,
+        host_side=True,
+    )
+
+    assert settings.db.url == raw.replace("@postgres:", "@127.0.0.1:")
+
+
+def test_host_side_logs_field_names_but_never_values(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """改写必须留痕（否则就是静默回落），但日志里只能有**字段名**。
+
+    ``db.url`` 与 ``redis.url`` 的密码就在字符串里；把值写进日志等于把生产密码
+    打进终端与 CI 记录 —— 与 ``milvus_init`` / ``probes`` 同一条纪律。
+    """
+    _make_unresolvable(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="src.config.loader"):
+        load_settings(
+            "dev",
+            environ={
+                "ALIGO__DB__URL": (
+                    "postgresql+asyncpg://aligo:s3cret-pw@postgres:5432/aligo"
+                ),
+            },
+            dotenv=False,
+            host_side=True,
+        )
+
+    assert "db.url" in caplog.text
+    assert "127.0.0.1" in caplog.text
+    assert "s3cret-pw" not in caplog.text
+    assert "aligo:s3cret-pw" not in caplog.text

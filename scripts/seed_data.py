@@ -78,7 +78,7 @@ from sqlalchemy import (  # noqa: E402
 )
 from sqlalchemy.ext.asyncio import AsyncEngine  # noqa: E402
 
-from src.config import Settings, get_settings, load_settings  # noqa: E402
+from src.config import Settings, load_settings  # noqa: E402
 from src.domain.entities import ApprovalRequest, TravelOrder  # noqa: E402
 from src.domain.enums import CabinClass, OrderStatus  # noqa: E402
 from src.knowledge.manager import SingleCollectionKbManager  # noqa: E402
@@ -1630,7 +1630,12 @@ def main() -> int:
 
     # ⚠️ 与 milvus_init.py 同一处坑：``get_settings()`` 没有 ``env`` 参数，
     # 要指定别的档位必须走 ``load_settings(env_name)``（它会自己读 .env）。
-    settings = load_settings(args.env) if args.env else get_settings()
+    #
+    # ⚠️ 也一样必须给 ``host_side=True``：本脚本由 ``make seed_data`` 在宿主机直跑，
+    # 而它要连的 Milvus 与 PostgreSQL 在 base.yaml 里都是容器服务名。
+    # 少了它，全新克隆上这一步会以「连不上 Milvus」告终 —— 但真正的原因在地址，
+    # 不在服务是否启动。见 loader 的 ``_host_reachable_endpoint``。
+    settings = load_settings(args.env, host_side=True)
 
     try:
         return asyncio.run(

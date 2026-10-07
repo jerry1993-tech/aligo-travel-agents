@@ -339,7 +339,7 @@ async def _check_milvus(settings: Settings) -> CheckResult:
         return CheckResult(
             name="milvus",
             ok=False,
-            detail=f"milvus.uri 解析不出主机名：{settings.milvus.uri!r}",
+            detail=f"milvus.uri 解析不出主机名：{_redact(settings.milvus.uri)!r}",
             duration_ms=(time.perf_counter() - started) * 1000,
         )
 

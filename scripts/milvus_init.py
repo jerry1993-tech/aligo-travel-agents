@@ -66,7 +66,7 @@ import sys
 # 允许以 `python scripts/milvus_init.py` 直接运行（此时 sys.path[0] 是 scripts/）。
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
-from src.config import Settings, get_settings, load_settings  # noqa: E402
+from src.config import Settings, load_settings  # noqa: E402
 from src.knowledge.store import (  # noqa: E402
     build_vector_store,
     describe_collection,
@@ -79,6 +79,12 @@ from src.knowledge.store import (  # noqa: E402
 # 派生规则只有一处真值（那个函数的文档里写着为什么）。这里抄一遍的后果是
 # 「脚本建了 A，应用写进 B」—— 而那种错的表现是「记忆不生效」，不报任何异常。
 from src.memory.semantic import memory_collection  # noqa: E402
+from src.observability.redaction import redact, safe_error  # noqa: E402
+
+# ⚠️ 本脚本会把 ``milvus.uri`` 原样打进终端与 CI 日志（两类场景：提示运维
+# 「连的是哪个地址」、以及把重建集合的命令拼成可复制的一行）。而 Milvus 的
+# URI 支持 ``http://user:pass@host`` —— 少了 ``redact``，密码就进了构建日志，
+# 那东西的读者范围比工单广得多。见 :mod:`src.observability.redaction`。
 
 
 def _targets(settings: Settings) -> list[tuple[str, str]]:
@@ -198,12 +204,22 @@ async def _run(settings: Settings) -> int:
             return 0
 
         print("\n⚠️ 本脚本**不会**自动重建集合 —— 删集合会丢光已索引的向量。")
+        # ⚠️ 脱敏有个代价：URI 带凭据时，下面这条命令**不能直接复制执行**。
+        # 这个取舍是刻意的 —— 命令可以补，日志里的密码补不回来。
+        # 但必须把这件事明说出来：否则运维会以为是命令本身写错了，
+        # 而一条「看起来对、跑起来错」的提示比没有提示更浪费时间。
+        uri_is_redacted = redact(settings.milvus.uri) != settings.milvus.uri
         for name, label in broken:
             print(
                 f"   {label}：确认可以重灌数据时，手工执行：\n"
                 f"       python -c \"import pymilvus;"
-                f"pymilvus.MilvusClient('{settings.milvus.uri}')"
+                f"pymilvus.MilvusClient('{redact(settings.milvus.uri)}')"
                 f".drop_collection('{name}')\"",
+            )
+        if uri_is_redacted:
+            print(
+                "   ⚠️ 命令里的 ***:*** 是脱敏占位符（日志里不留密码）。\n"
+                "      真要执行时，请换成 .env 里的真实 ALIGO__MILVUS__URI。",
             )
         print("   然后重跑本脚本。")
         return 1
@@ -235,12 +251,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # ⚠️ ``get_settings()`` **没有** ``env`` 参数（loader.py:456）——
+    # ⚠️ ``get_settings()`` **没有** ``env`` 参数（loader.py:591）——
     # 它读的是进程内的 ``ALIGO__APP__ENV``。要指定别的档位得走
     # ``load_settings(env_name)``（它会自己读 .env）。
     # 写成 ``get_settings(env=...)`` 会是一个 TypeError，
     # 且只在带 --env 时才触发 —— 属于「上线前最后一次手工验证才发现」的那类错。
-    settings = load_settings(args.env) if args.env else get_settings()
+    #
+    # ⚠️ ``host_side=True`` 不是可选项：本脚本由 ``make milvus_init`` 在**宿主机**
+    # 直跑（docs/06-部署与运维.md 的「改什么要重建」一节），而 base.yaml 给的
+    # ``milvus.uri`` 是容器服务名 —— 宿主机解析不了它。不给这个参数，全新克隆上
+    # 必然报「Fail connecting to server on milvus:19530」，且提示会把人引向
+    # 「Milvus 没起来」，而它其实好得很。见 loader 的 ``_host_reachable_endpoint``。
+    settings = load_settings(args.env, host_side=True)
 
     try:
         return asyncio.run(_run(settings))
@@ -253,8 +275,6 @@ def main() -> int:
         # 抛出的异常类型各不相同。让 traceback 直接打出来，
         # 比包一层只剩「初始化失败」的自定义异常有用得多 ——
         # 因为真正的线索（拒绝连接 / 名字不合法）就在那条消息里。
-        from src.observability.redaction import safe_error
-
         print(f"\n❌ 初始化失败：{safe_error(exc)}", file=sys.stderr)
         if isinstance(exc, ImportError) or "pymilvus" in str(exc):
             print(
@@ -264,7 +284,7 @@ def main() -> int:
             )
         else:
             print(
-                f"   提示：确认 Milvus 已启动且 {settings.milvus.uri} 可达"
+                f"   提示：确认 Milvus 已启动且 {redact(settings.milvus.uri)} 可达"
                 "（core 档含它：make up）。",
                 file=sys.stderr,
             )

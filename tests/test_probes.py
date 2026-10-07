@@ -132,6 +132,46 @@ async def test_readyz_never_leaks_credentials(client: AsyncClient) -> None:
     )
 
 
+async def test_the_milvus_probe_does_not_leak_credentials() -> None:
+    """Milvus 探针的 ``detail`` 里**绝不能**出现连接串凭据。
+
+    ⚠️ 与上面那条是**两条独立的路径**，不能互相代替。上面那条覆盖的是
+    「PostgreSQL / Redis 把 URL 塞进异常消息」，责任在底层库；这一条覆盖的是
+    「**我们自己**把 ``milvus.uri`` 拼进 detail」—— 后者底层库怎么改都挡不住，
+    只有本仓库自己的代码能挡。
+
+    ⚠️ 用的是「带凭据、但解析不出主机名」的 URI（``user:pass@`` 后面没有主机）。
+    这是刻意的两重选择：
+
+    · 它稳定命中那条拼字符串的分支，**不依赖 Milvus 是否可达** ——
+      否则这条用例会随本机有没有起 Milvus 而变红变绿，等于没测。
+    · 它同时证明了脱敏要发生在**拼接时**，而不是等 URL 拼完整了再补救。
+
+    用例里的密码是 ``s3cret-pw``，一个假值 —— 它在多条用例里复用，
+    目的是让 grep 能一次找出所有涉及凭据的断言。
+    """
+    from tests.conftest import TEST_ENVIRON
+
+    from src.config import load_settings
+    from src.server.probes import _check_milvus
+
+    environ = {
+        **TEST_ENVIRON,
+        "ALIGO__MILVUS__URI": "http://aligo:s3cret-pw@",
+    }
+    leaky = load_settings("test", environ=environ, dotenv=False)
+
+    result = await _check_milvus(leaky)
+
+    assert result.ok is False, "该 URI 解析不出主机名，探针必须判失败"
+    assert "s3cret-pw" not in result.detail, (
+        f"探针详情里泄漏了密码：{result.detail!r}"
+    )
+    assert "***" in result.detail, (
+        f"凭据没有被替换成占位符：{result.detail!r}"
+    )
+
+
 async def test_readyz_boot_check_reflects_lifespan(client: AsyncClient) -> None:
     """``boot`` 检查项在 lifespan 内必须为**通过**。
 

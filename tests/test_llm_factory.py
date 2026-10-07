@@ -198,7 +198,7 @@ def test_unknown_provider_is_rejected_at_load_time() -> None:
 
     ⚠️ 断言的是 ``ValueError`` 而非 pydantic 的 ``ValidationError``：
     ``load_settings`` 会把 pydantic 的报错**包一层**，附上「哪几个配置文件参与、
-    覆盖前缀是什么」的上下文（见 ``src/config/loader.py:387``）。
+    覆盖前缀是什么」的上下文（见 ``src/config/loader.py:575-579``）。
     直接断言 ValidationError 会穿透这层包装去测一个内部类型 ——
     而使用者真正看到的、也是真正该保证的，是那条带着配置文件路径的 ValueError。
     用例因此同时断言字段名出现在文案里：只说「校验失败」而不说是哪个字段，

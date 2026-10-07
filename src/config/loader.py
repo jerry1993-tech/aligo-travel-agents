@@ -26,7 +26,7 @@
 一旦上游加了新键，抄漏的那个环境就会静默缺键。这是本项目刻意避开的坑。
 
 ------------------------------------------------------------------------------
-两条容易踩的边界（都有对应的单测）
+三条容易踩的边界（都有对应的单测）
 ------------------------------------------------------------------------------
     · **字符串值里的 ``${VAR}`` 会被展开**（用进程环境变量）。
       这不是 YAML 语法（PyYAML 不认），是本模块 ``_expand_env`` 的行为。
@@ -35,6 +35,10 @@
       并汇总成一条 WARNING（不报错 —— 缺密钥的部署要能起来，见「零密钥原则」）。
     · **``ALIGO__`` 前缀的未知键会让启动直接失败**（schema 的 ``extra="forbid"``）。
       这是刻意的：拼错的键静默取默认值，是最难发现的一类偏差。
+    · **``host_side=True`` 会改写容器服务名**（``milvus`` → ``127.0.0.1``）。
+      只有显式声明的调用方（``scripts/`` 下由 ``make`` 在宿主机直跑的脚本）会传它，
+      且只在「服务名在本进程解析不了」时才生效 —— 容器内的解析结果是同一个对象，
+      逐字未变。见 :func:`_host_reachable_endpoint`。
 """
 
 from __future__ import annotations
@@ -42,8 +46,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Final, Mapping
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import ValidationError
@@ -64,6 +70,32 @@ _LEVEL_SEP = "__"
 #:   - 第一组：变量名（字母数字下划线，且不以数字开头）
 #:   - 第二组：可选默认值（``:-`` 之后直到 ``}`` 的全部内容）
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+#: compose 里「宿主机跑脚本也要连」的服务名。
+#:
+#: 为什么需要这张表：``config/base.yaml`` 给 ``milvus.uri`` / ``db.url`` /
+#: ``redis.url`` 写的是**容器内服务名**（``milvus`` / ``postgres`` / ``redis``），
+#: 这对容器是对的，但 ``scripts/`` 下的脚本由 ``make`` 在**宿主机**直跑
+#: （见 ``docs/06-部署与运维.md`` 的「改什么要重建」一节），而 Docker Desktop
+#: 不把容器名发布到宿主机 DNS —— 于是 ``make milvus_init`` 在全新克隆上必然
+#: 报「Fail connecting to server on milvus:19530」，且文案会把人引向
+#: 「Milvus 没起来」，而它其实好得很。
+#:
+#: 端口之所以能原样保留，是因为 compose 对这三个服务用的都是 ``A:A`` 同端口映射
+#: （``docker-compose.yaml`` 的 ``ports`` 段：19530 / 5432 / 6379）。
+#: ⚠️ 若哪天改了映射（例如 ``19531:19530``），这张表要跟着变成「服务名 → 宿主机端口」。
+_HOST_PUBLISHED_SERVICES: Final[frozenset[str]] = frozenset(
+    {"milvus", "postgres", "redis"},
+)
+
+#: 需要做宿主机改写的字段：(段名, 键名, 报错用的安全标签)。
+#: 标签里**只有字段路径、没有值** —— 这三条 URL 里两条内嵌密码（``db.url`` /
+#: ``redis.url``），日志里回显值就等于把生产密码写进终端与 CI 日志。
+_HOST_SIDE_FIELDS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("milvus", "uri", "milvus.uri"),
+    ("db", "url", "db.url"),
+    ("redis", "url", "redis.url"),
+)
 
 
 # ==============================================================================
@@ -257,6 +289,80 @@ def _env_overrides(environ: Mapping[str, str]) -> tuple[dict[str, Any], list[str
     return overrides, malformed
 
 
+# ==============================================================================
+# 宿主机直连改写（只对显式声明 host_side=True 的调用生效）
+# ==============================================================================
+def _host_reachable_endpoint(url: str) -> str | None:
+    """把「容器内服务名」换成本机可达的 ``127.0.0.1``；不需要换时返回 ``None``。
+
+    判定要**同时**满足三条，缺一不改：
+
+      1. URL 解析得出主机名，且它是本项目 compose 的服务名（``_HOST_PUBLISHED_SERVICES``）。
+         自定义主机名（``milvus.corp.internal``）哪怕解析不了也不动 —— 那可能是
+         内网 DNS 没配好，改写成 127.0.0.1 会把排障方向带偏；
+      2. 该主机名在**本进程**里解析不了。真的在容器内跑时服务名是能解析的，
+         于是这里原样返回、行为与改动前完全一致 —— 这一条是「容器路径零影响」的保证；
+      3. 仅改主机名，端口、路径、以及 netloc 里内嵌的凭据一字不动
+         （``db.url`` / ``redis.url`` 的密码就在 netloc 里）。
+
+    Args:
+        url (`str`): 形如 ``http://milvus:19530`` 或
+            ``postgresql+asyncpg://aligo:密码@postgres:5432/aligo``。
+
+    Returns:
+        `str | None`: 改写后的 URL；不需要改写时 ``None``。
+    """
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if not host or host not in _HOST_PUBLISHED_SERVICES:
+        return None
+
+    try:
+        socket.getaddrinfo(host, None)
+    except OSError:
+        pass  # 解析不了 —— 正是要救的那种情况，继续往下改写
+    else:
+        return None  # 解析得了（例如真的在容器里）—— 保持原样
+
+    # ⚠️ 这里刻意**不做** URL 重建（``userinfo + host + port`` 那种拼接）：
+    # 密码里可能含 ``@`` ``:`` 或百分号转义，重建要先解码再编码，一旦往返不一致
+    # 就把密码改坏了 —— 而症状是「鉴权失败」，与地址无关，排查方向直接跑偏。
+    # 按「最后一个 @ 之后才是 host:port」做纯字符串替换，其余部分逐字保留。
+    netloc = parsed.netloc
+    userinfo, at, hostport = netloc.rpartition("@")
+    _, colon, port = hostport.partition(":")
+    return parsed._replace(
+        netloc=f"{userinfo}{at}127.0.0.1{colon}{port}",
+    ).geturl()
+
+
+def _rewrite_service_hosts(raw: dict[str, Any]) -> list[str]:
+    """就地改写 ``raw`` 里指向容器服务名的地址，返回被改写的字段标签列表。
+
+    在**校验之前**的原始字典上操作，而不是在 ``Settings`` 上：既避开 pydantic
+    模型的不可变语义，也让非法值照旧走到第 5 步、拿到原本那条校验错误。
+
+    Args:
+        raw (`dict`): 第 4 步合并完、尚未交给 schema 校验的配置字典。
+
+    Returns:
+        `list[str]`: 被改写的字段路径（如 ``["milvus.uri"]``），用于日志。
+    """
+    changed: list[str] = []
+    for section, key, label in _HOST_SIDE_FIELDS:
+        node = raw.get(section)
+        if not isinstance(node, dict):
+            continue
+        value = node.get(key)
+        if not isinstance(value, str):
+            continue
+        rewritten = _host_reachable_endpoint(value)
+        if rewritten is not None:
+            node[key] = rewritten
+            changed.append(label)
+    return changed
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     """读取一个 YAML 文件并保证顶层是字典。
 
@@ -332,6 +438,7 @@ def load_settings(
     environ: Mapping[str, str] | None = None,
     config_dir: str | Path | None = None,
     dotenv: bool = True,
+    host_side: bool = False,
 ) -> Settings:
     """按「base.yaml → {env}.yaml → ALIGO__ 环境变量」的顺序装配并校验配置。
 
@@ -348,6 +455,18 @@ def load_settings(
             这是让配置相关的单测可重复的关键。
         config_dir (`str | Path | None`): config 目录；``None`` 时用仓库根的 ``config/``。
         dotenv (`bool`): 是否读取仓库根 ``.env`` 作为低优先级的补充。默认 True。
+        host_side (`bool`):
+            调用方是否**在宿主机上跑**（而不是容器内）。默认 ``False`` —— 容器路径
+            与绝大多数调用方都用默认值，行为与改动前逐字一致。
+
+            置 ``True`` 时会做一次地址兜底：``config/base.yaml`` 里的
+            ``milvus.uri`` / ``db.url`` / ``redis.url`` 写的是容器服务名，
+            宿主机解析不了；此时把它们的主机名换成 ``127.0.0.1``（端口不变，
+            compose 对这三个服务用的是同端口映射），并打一条 WARNING 说明改了哪个字段。
+
+            ⚠️ 这不是「静默回落」：只有「主机名 ∈ 本项目 compose 服务名」**且**
+            「本进程解析不了它」才动手，且一定留一条日志。能解析时（容器内、
+            或 /etc/hosts 里配了映射）原样返回。理由见 ``_host_reachable_endpoint``。
 
     Returns:
         `Settings`: 通过严格校验的配置对象。
@@ -429,6 +548,22 @@ def load_settings(
         app_section = {}
         raw["app"] = app_section
     app_section["env"] = resolved_env
+
+    # ---- 第 4.6 步：宿主机直连改写（默认关闭）--------------------------------
+    # 放在校验**之前**、环境变量覆盖**之后**：环境变量是最高优先级，用户若自己
+    # 显式给了 ``ALIGO__MILVUS__URI=http://milvus:19530``，那也该被纳入判定，
+    # 而不是只看 YAML 里那一份。
+    if host_side:
+        rewritten = _rewrite_service_hosts(raw)
+        if rewritten:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "宿主机直连改写：%s 指向的是容器服务名，本进程解析不了，"
+                "已换成 127.0.0.1（端口不变）。"
+                "若这不是本意，请在 .env 里显式设置对应键。",
+                "、".join(rewritten),
+            )
 
     # ---- 第 5 步：严格校验 ---------------------------------------------------
     try:

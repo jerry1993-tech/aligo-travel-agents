@@ -36,3 +36,6 @@ htmlcov/
 
 # 评测报告：scripts/eval.py 每次运行的产物，可重新生成，入库只会造成无意义的 diff
 eval_report.json
+
+# 第三方媒体软文（非项目文档，不入库）
+docs/知乎*.md

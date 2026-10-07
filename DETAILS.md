@@ -59,7 +59,7 @@ P3/P4 之后它背后**已经有差旅业务能力** —— 快慢车道分流�
 
 **已验证 / 未验证**：
 
-- ✅ `make test` 绿（**2279 个用例，不需要 Docker**，用 sqlite 内存库；主环境实测 `2279 passed in 149.66s`、全新 venv 实测 `2279 passed in 147.34s`）
+- ✅ `make test` 绿（**2287 个用例，不需要 Docker**，用 sqlite 内存库；主环境实测 `2287 passed in 132.19s`、全新 venv 实测 `2287 passed in 208.78s`）
 - ✅ P2 的流式验收**对真实 uvicorn + 真实 TCP** 跑过（不是 `httpx.ASGITransport` ——
   它会缓冲整个响应体，SSE 在它上面一个字节都读不到，见 `tests/test_e2e_stream.py` 的模块文档字符串）
 - ✅ `make check-docs` 绿（两道闸门都通过；具体检查了多少条由脚本自己打印 ——
