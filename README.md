@@ -381,6 +381,7 @@ web/                 # 前端 pnpm workspace（frontend/ 基于 examples/web_ui 
 | [`docs/01-功能接口.md`](docs/01-功能接口.md) | HTTP 端点、工具集、返回契约、状态码约定 |
 | [`docs/02-技术架构.md`](docs/02-技术架构.md) | 分层、装配、数据流 |
 | [`docs/03-模块关系与调用逻辑.md`](docs/03-模块关系与调用逻辑.md) | 各包职责与启动装配顺序 |
+| [`docs/04-架构与流程图.md`](docs/04-架构与流程图.md) | 当前实现的架构图与流程图（Mermaid，GitHub 直接渲染） |
 | [`docs/06-部署与运维.md`](docs/06-部署与运维.md) | 档位、配置、探针、迁移、扩容与排障 |
 | [`DETAILS.md`](DETAILS.md) | 工程细节展开版：每个坑的来龙去脉、核验证据与测试统计 |
 
