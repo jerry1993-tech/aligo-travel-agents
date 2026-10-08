@@ -43,24 +43,7 @@
 
 ## 系统架构
 
-```text
-浏览器（web/frontend，构建产物由 app 同源托管）
-   │  X-User-ID 或 Bearer JWT
-   ▼
-ASGI 中间件链：TraceContext → HttpMetrics → Auth → MockCredentialSeed → RateLimit
-   ▼
-src/server/app.py（uvicorn src.server.app:app）
-   ├ 框架路由（无前缀）：/chat/  /sessions/**(SSE)  /agent  /knowledge_bases  /mcp  …
-   ├ 业务命名空间：/api/v1/**（与框架路由并行，不是它的外壳）
-   └ 根探针：/healthz  /readyz  /metrics
-   ▼
-main_plan 智能体（六段 Agent 中间件：
-   LaneRouter → Tracing → Breaker → ModelTimeout → ContextInjection → HintSuppression）
-   ├ 子智能体：intent / policy_rag / approval / order_query
-   └ 工具：7 个 FunctionTool（交通 / 酒店 / 差标 / 订单 / 审批 / 路由 / 意图）
-   ▼
-PostgreSQL（业务库 + 框架表）   Redis（会话 / 消息总线）   Milvus（政策库 + 记忆集合）
-```
+![多智能体系统架构流程图](./docs/images/多智能体系统架构流程图.png)
 
 三条容易踩错、已在代码注释里写死的约定：
 
